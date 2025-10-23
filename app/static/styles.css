@@ -1,0 +1,52 @@
+body {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+main {
+  padding: 2rem 0;
+}
+
+header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+header h1 {
+  margin-bottom: 0.5rem;
+}
+
+.lead {
+  color: #94a3b8;
+}
+
+.meta {
+  font-size: 0.9rem;
+  color: #cbd5f5;
+}
+
+article {
+  background: rgba(15, 23, 42, 0.8);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.4);
+  padding: 1.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+details {
+  margin-top: 1rem;
+}
+
+summary {
+  cursor: pointer;
+}
+
+canvas {
+  max-height: 240px;
+}
+
+@media (max-width: 768px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
