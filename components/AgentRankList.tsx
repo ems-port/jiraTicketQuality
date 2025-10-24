@@ -85,7 +85,7 @@ function Sparkline({ points }: { points: AgentPerformancePoint[] }) {
 
   return (
     <svg
-      aria-hidden="true"
+      aria-hidden={true}
       width={width}
       height={height}
       viewBox={`0 0 ${width} ${height}`}

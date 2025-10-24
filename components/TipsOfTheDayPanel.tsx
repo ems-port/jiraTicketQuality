@@ -18,7 +18,7 @@ export function TipsOfTheDayPanel({ summary, onOpen }: TipsOfTheDayPanelProps) {
           <p className="text-xs text-slate-400">Highlights pulled from the most recent 24 hours of coaching notes.</p>
         </div>
         <div className="flex items-center gap-2 rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
-          <ClockGlyph className="h-4 w-4 text-brand-300" aria-hidden="true" />
+          <ClockGlyph className="h-4 w-4 text-brand-300" aria-hidden={true} />
           <span>
             {formatDateTimeLocal(windowStart)} → {formatDateTimeLocal(windowEnd)}
           </span>
