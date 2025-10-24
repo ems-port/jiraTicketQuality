@@ -1,0 +1,14 @@
+{
+  "model": "gpt-5-nano",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a meticulous quality assurance analyst who responds in JSON. Conversation transcript lines use 'A:' for agent and 'C:' for customer to optimise tokens."
+    },
+    {
+      "role": "user",
+      "content": "\nIssue key: CC-39389\nStatus: In Progress\nResolution: \nConversation start (UTC): 2025-10-24T00:38:00+00:00\nConversation end (UTC): 2025-10-24T00:40:00+00:00\nTotal messages: 6\nAgent messages: 3\nCustomer messages: 3\nEstimated duration (minutes): 2.00\nOriginal contact reason: Not specified\nContact taxonomy:\n- System outage: system outage, network outage, not working\n- Request to transfer subscription/pass to a different hub: transfer subscription, transfer pass, move subscription\n- info/question about my current subscription / pass: subscription info, subscription question, pass info\n...\n\nTranscript (A = agent, C = customer, U = unknown):\n01. A: [2025-10-24T00:38:00+00:00] Hey there! Thanks for reaching out.\n02. C: [2025-10-24T00:38:00+00:00] Bike won't lock\n03. A: [2025-10-24T00:38:00+00:00] Lean the bike and wait a minute please\n...\n\nReview the conversation above and output a JSON object with these keys:\n- llm_summary_250: concise summary (<=250 characters).\n- conversation_rating: integer 1-5 (overall quality).\n- extract_customer_probelm: short explanation of the customer's main problem.\n- contact_reason: choose the closest entry from the provided contact taxonomy. If unsure, return \"Other\".\n- agent_score: integer 1-5 reflecting agent performance.\n- customer_score: integer 1-5 reflecting customer behavior and clarity.\n- resolved: boolean true/false indicating whether the issue seems resolved.\n- improvement_tip: actionable advice for the agent (<=200 characters).\n\nScoring guidance (apply separately to conversation_rating, agent_score, customer_score):\n1 = Very poor (major issues, inaccurate or harmful behaviour).\n2 = Poor (significant problems or missing key actions).\n3 = Adequate (meets minimum expectations with notable gaps).\n4 = Good (solid performance with only minor improvements needed).\n5 = Excellent (exemplary work, no meaningful improvements needed).\n\nReturn ONLY strict JSON, no explanations.\n"
+    }
+  ],
+  "max_completion_tokens": 600
+}

@@ -1,4 +1,0 @@
-issue_key,created_at,resolved_at,quality_score,agent_score,customer_sentiment,abusive_language,needs_improvement,improvement_notes,agent_highlights
-ITSM-201,2024-05-10T08:00:00+00:00,2024-05-10T10:15:00+00:00,3.30,3.80,neutral,False,True,Review conversation for coaching opportunities.,Thanks for reaching out! I'll run diagnostics and push a driver patch. | Great news! I'll keep the ticket open for 24 hours just in case.
-ITSM-202,2024-05-11T12:40:00+00:00,2024-05-12T15:00:00+00:00,1.30,3.30,negative,True,True,"Agent message indicates delay: 'Sorry for the delay, I'm reviewing the logs now.' Customer used abusive language.","Sorry for the delay, I'm reviewing the logs now. | I've escalated to networking. Expect an update soon."
-ITSM-203,2024-05-08T06:10:00+00:00,2024-05-10T18:45:00+00:00,3.30,3.40,neutral,False,True,Review conversation for coaching opportunities.,Happy to help. I'll submit the access request and confirm.

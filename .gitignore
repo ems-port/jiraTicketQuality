@@ -5,3 +5,7 @@ __pycache__/
 .env
 .idea/
 .vscode/
+/local_data/*
+node_modules/
+**/node_modules/
+.next/
