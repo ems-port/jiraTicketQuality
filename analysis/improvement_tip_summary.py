@@ -82,19 +82,20 @@ class ImprovementTip:
     conversation_start: datetime
 
 
-def load_recent_tips(csv_path: Path, window_start: datetime) -> List[ImprovementTip]:
+def load_tips_and_latest(csv_path: Path) -> Tuple[List[ImprovementTip], Optional[datetime]]:
     tips: List[ImprovementTip] = []
+    latest: Optional[datetime] = None
     with csv_path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            raw_tip = (row.get("improvement_tip") or "").strip()
-            if not raw_tip:
-                continue
             started = _parse_datetime(row.get("conversation_start"))
-            if started is None or started < window_start:
+            if started and (latest is None or started > latest):
+                latest = started
+            raw_tip = (row.get("improvement_tip") or "").strip()
+            if not raw_tip or started is None:
                 continue
             tips.append(ImprovementTip(text=raw_tip, conversation_start=started))
-    return tips
+    return tips, latest
 
 
 def format_feedback_counts(counts: Sequence[Tuple[str, int]], limit: int) -> str:
@@ -262,24 +263,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.hours <= 0:
         print("[error] --hours must be positive.", file=sys.stderr)
         return 2
-    try:
-        window_end = (
-            _parse_datetime(args.reference_time)
-            if args.reference_time
-            else datetime.now(timezone.utc)
-        )
-        if window_end is None:
-            raise ValueError
-    except ValueError:
-        print(f"[error] Could not parse --reference-time={args.reference_time!r}", file=sys.stderr)
-        return 2
-
-    window_start = window_end - timedelta(hours=args.hours)
     if not args.csv_path.exists():
         print(f"[error] CSV not found at {args.csv_path}", file=sys.stderr)
         return 1
 
-    tips = load_recent_tips(args.csv_path, window_start)
+    all_tips, latest_start = load_tips_and_latest(args.csv_path)
+    if not all_tips:
+        print("No improvement tips were found in the file.", file=sys.stderr)
+        return 0
+
+    if args.reference_time:
+        window_end = _parse_datetime(args.reference_time)
+        if window_end is None:
+            print(f"[error] Could not parse --reference-time={args.reference_time!r}", file=sys.stderr)
+            return 2
+    else:
+        if latest_start is None:
+            print("No valid conversation_start timestamps were found.", file=sys.stderr)
+            return 1
+        window_end = latest_start
+
+    window_start = window_end - timedelta(hours=args.hours)
+
+    tips = [
+        tip
+        for tip in all_tips
+        if window_start <= tip.conversation_start <= window_end
+    ]
     if not tips:
         print(
             f"No improvement tips after {window_start.isoformat(timespec='seconds')} UTC were found.",
@@ -339,4 +349,3 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - script entry point
     raise SystemExit(main())
-

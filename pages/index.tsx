@@ -129,9 +129,20 @@ export default function DashboardPage() {
     });
   }, [sourceRows, searchTerm, agentFilter, hubFilter, modelFilter]);
 
+  const referenceNow = useMemo(() => {
+    let latest: Date | null = null;
+    sourceRows.forEach((row) => {
+      const candidate = row.endedAt ?? row.startedAt;
+      if (candidate && (!latest || candidate.getTime() > latest.getTime())) {
+        latest = candidate;
+      }
+    });
+    return latest ? new Date(latest) : new Date();
+  }, [sourceRows]);
+
   const filteredRows = useMemo(
-    () => filterByWindow(attributeFilteredRows, selectedWindow),
-    [attributeFilteredRows, selectedWindow]
+    () => filterByWindow(attributeFilteredRows, selectedWindow, referenceNow),
+    [attributeFilteredRows, selectedWindow, referenceNow]
   );
 
   const resolvedRows = useMemo(
@@ -145,16 +156,16 @@ export default function DashboardPage() {
   );
 
   const ratingSeries = useMemo(
-    () => buildMetricSeries(attributeFilteredRows, computeAverageConversationRating),
-    [attributeFilteredRows]
+    () => buildMetricSeries(attributeFilteredRows, computeAverageConversationRating, referenceNow),
+    [attributeFilteredRows, referenceNow]
   );
   const resolvedSeries = useMemo(
-    () => buildResolvedSeries(attributeFilteredRows),
-    [attributeFilteredRows]
+    () => buildResolvedSeries(attributeFilteredRows, referenceNow),
+    [attributeFilteredRows, referenceNow]
   );
   const escalatedSeries = useMemo(
-    () => buildMetricSeries(attributeFilteredRows, computeEscalatedCount),
-    [attributeFilteredRows]
+    () => buildMetricSeries(attributeFilteredRows, computeEscalatedCount, referenceNow),
+    [attributeFilteredRows, referenceNow]
   );
 
   const selectedRating =
@@ -171,30 +182,30 @@ export default function DashboardPage() {
     escalatedSeries.find((entry) => entry.window === selectedWindow)?.value ?? null;
 
   const topAgents = useMemo(
-    () => computeTopAgents(attributeFilteredRows),
-    [attributeFilteredRows]
+    () => computeTopAgents(attributeFilteredRows, referenceNow),
+    [attributeFilteredRows, referenceNow]
   );
   const toxicCustomers = useMemo(
-    () => computeToxicCustomers(attributeFilteredRows, settings),
-    [attributeFilteredRows, settings]
+    () => computeToxicCustomers(attributeFilteredRows, settings, referenceNow),
+    [attributeFilteredRows, settings, referenceNow]
   );
   const flaggedAgents = useMemo(
-    () => computeFlaggedAgents(attributeFilteredRows, settings),
-    [attributeFilteredRows, settings]
+    () => computeFlaggedAgents(attributeFilteredRows, settings, referenceNow),
+    [attributeFilteredRows, settings, referenceNow]
   );
   const agentMatrix = useMemo(
-    () => computeAgentMatrix(attributeFilteredRows, selectedWindow),
-    [attributeFilteredRows, selectedWindow]
+    () => computeAgentMatrix(attributeFilteredRows, selectedWindow, referenceNow),
+    [attributeFilteredRows, selectedWindow, referenceNow]
   );
 
   const improvementTipSummary = useMemo(
-    () => computeImprovementTips(attributeFilteredRows),
-    [attributeFilteredRows]
+    () => computeImprovementTips(attributeFilteredRows, referenceNow),
+    [attributeFilteredRows, referenceNow]
   );
 
   const contactReasonSummary = useMemo(
-    () => computeContactReasonSummary(attributeFilteredRows, selectedWindow),
-    [attributeFilteredRows, selectedWindow]
+    () => computeContactReasonSummary(attributeFilteredRows, selectedWindow, referenceNow),
+    [attributeFilteredRows, selectedWindow, referenceNow]
   );
 
   const agentOptions = useMemo(() => {
