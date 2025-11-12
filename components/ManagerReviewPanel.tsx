@@ -77,6 +77,10 @@ export function ManagerReviewPanel({ rows, mapping, deAnonymize }: ManagerReview
       ? selected.stepsExtract
       : ["Model did not return any resolution steps."];
 
+  const rawProblemExtract =
+    typeof selected.raw?.["extract_customer_problem"] === "string"
+      ? selected.raw["extract_customer_problem"]
+      : undefined;
   const resolutionMarker = buildResolutionMarker(selected);
 
   return (
@@ -135,7 +139,7 @@ export function ManagerReviewPanel({ rows, mapping, deAnonymize }: ManagerReview
           <dl className="mt-4 grid gap-2 text-sm text-slate-300">
             <div className="flex flex-col rounded-xl border border-slate-800 bg-slate-950/40 p-3">
               <dt className="text-xs uppercase tracking-wide text-slate-500">Problem extract</dt>
-              <dd>{selected.problemExtract ?? selected.raw?.extract_customer_problem ?? "Not provided."}</dd>
+              <dd>{selected.problemExtract ?? rawProblemExtract ?? "Not provided."}</dd>
             </div>
             <div className="flex flex-col rounded-xl border border-slate-800 bg-slate-950/40 p-3">
               <dt className="text-xs uppercase tracking-wide text-slate-500">Resolution extract</dt>
