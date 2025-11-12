@@ -34,6 +34,7 @@ function makeRow(overrides: Partial<ConversationRow>): ConversationRow {
     startedAt: overrides.startedAt ?? NOW,
     endedAt: overrides.endedAt ?? NOW,
     durationMinutes: overrides.durationMinutes ?? 30,
+    durationToResolutionMinutes: overrides.durationToResolutionMinutes ?? 25,
     firstAgentResponseMinutes: overrides.firstAgentResponseMinutes ?? 5,
     avgAgentResponseMinutes: overrides.avgAgentResponseMinutes ?? 15,
     messagesTotal: overrides.messagesTotal ?? 6,

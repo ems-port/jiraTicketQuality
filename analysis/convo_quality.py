@@ -19,6 +19,7 @@ import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from dateutil import parser as dt_parser
@@ -165,6 +166,13 @@ def _truncate(value: str, limit: int) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _limit_words(value: str, limit: int) -> str:
+    words = value.strip().split()
+    if len(words) <= limit:
+        return value.strip()
+    return " ".join(words[:limit])
+
+
 def _coerce_bool(value: Any) -> Optional[bool]:
     if isinstance(value, bool):
         return value
@@ -275,7 +283,8 @@ def _normalise_llm_payload(
     data["extract_customer_probelm"] = problem_text
 
     resolution_extract = _truncate(_stringify(data.get("resolution_extract")), MAX_SUMMARY_CHARS)
-    data["resolution_extract"] = resolution_extract
+    resolution_extract = _limit_words(resolution_extract, 15)
+    data["resolution_extract"] = resolution_extract.strip()
 
     improvement_tip = _truncate(_stringify(data.get("improvement_tip")), MAX_IMPROVEMENT_TIP_CHARS)
     data["improvement_tip"] = improvement_tip
@@ -294,9 +303,6 @@ def _normalise_llm_payload(
         else:
             contact_reason_change = bool(contact_reason and not original_reason)
     data["contact_reason_change"] = bool(contact_reason_change)
-
-    data["contact_reason_change_justification"] = reason_override
-    data["llm_conatct_reason_change"] = reason_override
 
     is_resolved_flag = _coerce_bool(data.get("is_resolved"))
     resolved_flag = is_resolved_flag
@@ -328,6 +334,22 @@ def _normalise_llm_payload(
     if sentiment_primary not in SENTIMENT_BUCKETS:
         sentiment_primary = max(sentiment_scores.items(), key=lambda entry: entry[1])[0]
     data["customer_sentiment_primary"] = sentiment_primary
+
+    agent_prof_flag = _coerce_bool(data.get("agent_profanity_detected"))
+    data["agent_profanity_detected"] = (
+        bool(agent_prof_flag) if agent_prof_flag is not None else None
+    )
+    agent_prof_count = _coerce_int(data.get("agent_profanity_count"))
+    data["agent_profanity_count"] = max(0, agent_prof_count) if agent_prof_count is not None else None
+
+    customer_abuse_flag = _coerce_bool(data.get("customer_abuse_detected"))
+    data["customer_abuse_detected"] = (
+        bool(customer_abuse_flag) if customer_abuse_flag is not None else None
+    )
+    customer_abuse_count = _coerce_int(data.get("customer_abuse_count"))
+    data["customer_abuse_count"] = (
+        max(0, customer_abuse_count) if customer_abuse_count is not None else None
+    )
 
     agent_score = data.get("agent_score")
     if isinstance(agent_score, (int, float)) or (
@@ -387,6 +409,7 @@ CSV_FIELDS: Sequence[str] = (
     "conversation_start",
     "conversation_end",
     "duration_minutes",
+    "duration_to_resolution",
     "first_agent_response_minutes",
     "avg_agent_response_minutes",
     "avg_customer_response_minutes",
@@ -404,7 +427,6 @@ CSV_FIELDS: Sequence[str] = (
     "customer_abuse_count",
     "llm_summary_250",
     "conversation_rating",
-    "extract_customer_problem",
     "problem_extract",
     "resolution_extract",
     "steps_extract",
@@ -414,11 +436,13 @@ CSV_FIELDS: Sequence[str] = (
     "contact_reason_original",
     "contact_reason_change",
     "reason_override_why",
-    "contact_reason_change_justification",
-    "llm_conatct_reason_change",
     "resolution_why",
     "customer_sentiment_primary",
     "customer_sentiment_scores",
+    "agent_profanity_detected",
+    "agent_profanity_count",
+    "customer_abuse_detected",
+    "customer_abuse_count",
     "agent_score",
     "customer_score",
     "resolved",
@@ -432,16 +456,17 @@ CSV_FIELDS: Sequence[str] = (
 
 
 MODEL_PRICING: Dict[str, Dict[str, float]] = {
-    # Pricing is kept in dollars per 1K tokens.
-    # References: https://platform.openai.com/pricing
-    "gpt-4o": {"input": 0.01, "output": 0.03},
-    "gpt-4o-mini": {"input": 0.0025, "output": 0.01},
+    # Pricing in USD per 1M tokens (rounded). Update when vendors publish new rates.
+    "gpt-4o": {"input": 10.0, "output": 30.0},
+    "gpt-4o-mini": {"input": 2.5, "output": 10.0},
+    "gpt-4.1-nano": {"input": 0.20, "cached_input": 0.05, "output": 0.80},
+    "gpt-4.1-nano-ft": {"input": 0.80, "cached_input": 0.20, "output": 3.20},
+    "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.40},
+    "gpt-5-nano-ft": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
     # GPT-5 placeholder tiers (update when official numbers are published)
-    "gpt-5.0": {"input": 0.005, "output": 0.015},
-    "gpt-5.0-mini": {"input": 0.002, "output": 0.006},
-    "gpt-5.0-pro": {"input": 0.01, "output": 0.03},
-    # gpt-5-nano published pricing: $0.050 / 1M input, $0.400 / 1M output
-    "gpt-5-nano": {"input": 0.00005, "output": 0.0004},
+    "gpt-5.0": {"input": 5.0, "output": 15.0},
+    "gpt-5.0-mini": {"input": 2.0, "output": 6.0},
+    "gpt-5.0-pro": {"input": 10.0, "output": 30.0},
 }
 
 
@@ -500,8 +525,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="gpt-4o-mini",
-        help="Chat model identifier for LLM augmentation (default: gpt-4o-mini).",
+        default="gpt-5-nano",
+        help="Chat model identifier for LLM augmentation (default: gpt-5-nano).",
     )
     parser.add_argument(
         "--temperature",
@@ -531,9 +556,21 @@ def parse_args() -> argparse.Namespace:
         help="Skip LLM augmentation. Outputs baseline metrics only.",
     )
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Maximum number of parallel LLM calls (default: 1).",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Print LLM prompts and responses for inspection.",
+    )
+    parser.add_argument(
+        "--debug-prompts",
+        choices=("none", "input", "output", "both"),
+        default="none",
+        help="Select which prompts to print for debugging (default: none).",
     )
     parser.add_argument(
         "--verbose",
@@ -590,12 +627,28 @@ def estimate_tokens(text: str, model: str) -> int:
     return max(1, int(len(text.split()) * 1.33))
 
 
-def estimate_cost(model: str, prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Optional[float]:
+def estimate_cost(
+    model: str,
+    prompt_tokens: Optional[int],
+    completion_tokens: Optional[int],
+    cached_prompt_tokens: Optional[int] = None,
+) -> Optional[float]:
     pricing = MODEL_PRICING.get(model)
     if not pricing or prompt_tokens is None or completion_tokens is None:
         return None
-    cost = (prompt_tokens / 1000.0) * pricing["input"]
-    cost += (completion_tokens / 1000.0) * pricing["output"]
+    input_rate = pricing.get("input")
+    output_rate = pricing.get("output")
+    cached_rate = pricing.get("cached_input", input_rate)
+    if input_rate is None or output_rate is None:
+        return None
+    cached_tokens = min(max(cached_prompt_tokens or 0, 0), prompt_tokens)
+    normal_prompt_tokens = prompt_tokens - cached_tokens
+    cost = (normal_prompt_tokens / 1_000_000.0) * input_rate
+    if cached_rate:
+        cost += (cached_tokens / 1_000_000.0) * cached_rate
+    else:
+        cost += (cached_tokens / 1_000_000.0) * input_rate
+    cost += (completion_tokens / 1_000_000.0) * output_rate
     return cost
 
 
@@ -757,7 +810,6 @@ def compute_metrics(comments: List[Comment]) -> ConversationMetrics:
     messages_agent = sum(1 for c in comments if c.role == "agent")
     messages_customer = sum(1 for c in comments if c.role == "customer")
 
-    last_customer_time: Optional[datetime] = None
     last_agent_time: Optional[datetime] = None
     agent_deltas: List[float] = []
     customer_deltas: List[float] = []
@@ -772,14 +824,19 @@ def compute_metrics(comments: List[Comment]) -> ConversationMetrics:
     agent_authors_set: set[str] = set()
     customer_authors_set: set[str] = set()
 
+    pending_customer_ts: Optional[datetime] = None
+
     for comment in comments:
         if comment.role == "agent":
-            if comment.timestamp and last_customer_time:
-                delta = minutes_between(last_customer_time, comment.timestamp)
-                agent_deltas.append(delta)
-                if first_agent_response_minutes is None:
-                    first_agent_response_minutes = delta
-            if comment.timestamp:
+            if comment.timestamp and pending_customer_ts:
+                delta = minutes_between(pending_customer_ts, comment.timestamp)
+                if delta >= 0:
+                    agent_deltas.append(delta)
+                    if first_agent_response_minutes is None:
+                        first_agent_response_minutes = delta
+                pending_customer_ts = None
+                last_agent_time = comment.timestamp
+            elif comment.timestamp:
                 last_agent_time = comment.timestamp
             agent_profanity_count += count_term_hits(comment.text, PROFANITY_TERMS)
             if comment.author:
@@ -789,7 +846,8 @@ def compute_metrics(comments: List[Comment]) -> ConversationMetrics:
                 delta = minutes_between(last_agent_time, comment.timestamp)
                 customer_deltas.append(delta)
             if comment.timestamp:
-                last_customer_time = comment.timestamp
+                if pending_customer_ts is None:
+                    pending_customer_ts = comment.timestamp
             customer_abuse_count += count_term_hits(comment.text, CUSTOMER_ABUSE_TERMS)
             if comment.author:
                 customer_authors_set.add(comment.author)
@@ -904,30 +962,31 @@ def build_llm_prompts(
         1. Compare the customer's stated problem to the agent's classification. Set contact_reason_change=true when your chosen contact_reason differs from the original, and explain the override using literal phrases or timestamps from the transcript.
         2. Decide whether the conversation is resolved. Set both resolved and is_resolved accordingly, and write resolution_why that cites the agent or customer action that proves the outcome (or why it failed).
         3. Provide one-sentence summaries:
-           a. problem_extract – customer's core problem (<=250 chars).
-           b. resolution_extract – how it was solved or why it remains open (<=250 chars).
+           a. problem_extract – concise but specific customer problem (<=250 chars). Mention concrete damage, location, or outage cause.
+           b. resolution_extract – outcome in <15 words explaining how it was solved or why open.
         4. List chronological agent actions that moved the ticket forward in steps_extract (array of short strings, earliest first, max 8 entries).
         5. Identify the message where the issue was resolved (customer confirmation or decisive agent fix). Populate resolution_timestamp_iso (ISO 8601) and resolution_message_index (1-based transcript index). Use null for both when unresolved.
         6. Produce customer sentiment:
            - customer_sentiment_primary must be one of: Delight, Convenience, Trust, Frustration, Disappointment, Concern, Hostility, Neutral.
            - customer_sentiment_scores is an object with those eight keys. Values are floats between 0 and 1 that sum to ~1.00 (±0.02 tolerance).
         7. Generate llm_summary_250 (<=250 chars), conversation_rating/agent_score/customer_score (integers 1-5), improvement_tip (<=200 chars, actionable).
+        8. Detect abuse and profanity: set agent_profanity_detected / agent_profanity_count (agent side) and customer_abuse_detected / customer_abuse_count (customer side). Only count explicit insults, slurs, or profanity pointed at the counterpart/company.
 
         Strict JSON schema (all fields required, nulls allowed only when noted):
         {
-          "llm_summary_250": string (<=250 chars),
+          "llm_summary_250": string (<=150 chars),
           "conversation_rating": integer (1-5),
           "extract_customer_probelm": string (mirror of problem_extract),
-          "problem_extract": string (<=250 chars),
-          "resolution_extract": string (<=250 chars),
+          "problem_extract": string (<=150 chars),
+          "resolution_extract": string (<=150 chars),
           "contact_reason": string from taxonomy (or "Other"),
           "contact_reason_change": boolean,
-          "reason_override_why": string (<=600 chars, cite transcript cues when contact_reason_change=true; use empty string when no change),
+          "reason_override_why": string (<=300 chars, cite transcript cues when contact_reason_change=true; use empty string when no change),
           "agent_score": integer (1-5),
           "customer_score": integer (1-5),
           "resolved": boolean,
           "is_resolved": boolean,
-          "resolution_why": string (<=600 chars, factual rationale for resolved/unresolved),
+          "resolution_why": string (<=300 chars, factual rationale for resolved/unresolved),
           "steps_extract": array of strings,
           "resolution_timestamp_iso": string | null (ISO 8601 for the resolution moment, null if unresolved),
           "resolution_message_index": integer | null (1-based index of the decisive message, null if unresolved),
@@ -942,6 +1001,10 @@ def build_llm_prompts(
             "Hostility": number,
             "Neutral": number
           },
+          "agent_profanity_detected": boolean,
+          "agent_profanity_count": integer (>=0),
+          "customer_abuse_detected": boolean,
+          "customer_abuse_count": integer (>=0),
           "improvement_tip": string (<=200 chars)
         }
 
@@ -949,8 +1012,35 @@ def build_llm_prompts(
         - Quote short phrases (e.g., "customer: bike stuck at finish screen") inside reason_override_why and resolution_why to justify decisions.
         - steps_extract should only describe agent actions or system fixes that move toward resolution; omit chit-chat.
         - When unresolved, explain the blocker inside resolution_why and set both resolution_timestamp_iso and resolution_message_index to null.
+        - Make resolution_extract under 15 words; problem_extract must stay concise yet include the concrete issue details (what broke, which dock, which outage cause, etc.).
+        - If profanity/abuse counts differ from transcript reality, explain briefly in resolution_why.
         - Keep tone factual and manager-ready. Return STRICT JSON only—no Markdown or extra commentary.
         - Scoring scale for conversation_rating, agent_score, and customer_score: 1=Very poor, 2=Poor, 3=Adequate, 4=Good, 5=Excellent.
+
+        Detailed scoring guidance:
+        CONVERSATION_RATING
+        • Primary signals: resolved flag, sentiment at end, proof of closure, avoidable effort.
+        • 5 → resolved=true AND resolution_timestamp_iso provided AND customer_sentiment_primary in {Delight, Convenience, Trust}.
+        • 4 → resolved=true AND customer_sentiment_primary in {Neutral} OR clear shift from Frustration to Neutral; only minor avoidable effort.
+        • 3 → unresolved BUT a clear next step is agreed and no harm done; neutral tone.
+        • 2 → unresolved AND misclassification left uncorrected OR long back-and-forth with little progress.
+        • 1 → incorrect/unsafe guidance, policy breach, or hostility escalation.
+
+        AGENT_SCORE
+        • Primary signals: correct diagnosis/classification, useful actions, ownership, clarity.
+        • 5 → correct contact_reason or justified override; at least two concrete steps_extract; delivers fix or definitive path; clear instructions.
+        • 4 → small miss but corrected; steps_extract present; only minor clarity gaps.
+        • 3 → some helpful action but partial or vague; missed one key step.
+        • 2 → wrong or uncorrected classification OR speculative help with low action density.
+        • 1 → harmful, rude, vulgar, or no actionable help.
+
+        CUSTOMER_SCORE
+        • Primary signals: final customer message, sentiment curve, explicit thanks/relief.
+        • 5 → explicit positive closure (“works now,” “thanks!”) or Delight/Trust sentiment at the end.
+        • 4 → polite thanks without enthusiasm; Neutral at the end.
+        • 3 → neutral acceptance (“ok,” “I’ll try”) without closure proof.
+        • 2 → lingering doubt, mild Frustration/Concern, or abandonment.
+        • 1 → Hostility/Disappointment or vulgar/profane language directed at the agent/company (swearing acceptable only when describing the issue itself).
         """
     ).strip()
 
@@ -1097,6 +1187,10 @@ def build_request_payload(
                             "required": list(SENTIMENT_BUCKETS),
                             "additionalProperties": False,
                         },
+                        "agent_profanity_detected": {"type": "boolean"},
+                        "agent_profanity_count": {"type": "integer", "minimum": 0},
+                        "customer_abuse_detected": {"type": "boolean"},
+                        "customer_abuse_count": {"type": "integer", "minimum": 0},
                         "improvement_tip": {"type": "string", "maxLength": MAX_IMPROVEMENT_TIP_CHARS},
                     },
                     "required": [
@@ -1118,6 +1212,10 @@ def build_request_payload(
                         "resolution_message_index",
                         "customer_sentiment_primary",
                         "customer_sentiment_scores",
+                        "agent_profanity_detected",
+                        "agent_profanity_count",
+                        "customer_abuse_detected",
+                        "customer_abuse_count",
                         "improvement_tip",
                     ],
                     "additionalProperties": False,
@@ -1155,11 +1253,13 @@ def call_llm(
     system_prompt: str,
     user_prompt: str,
     debug: bool = False,
+    debug_input: bool = False,
+    debug_output: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[int], Optional[int], Optional[str]]:
     if openai_client is None:
         return None, None, None, None
 
-    if debug:
+    if debug_input:
         print("=== LLM SYSTEM PROMPT ===", flush=True)
         print(system_prompt, flush=True)
         print("=== LLM USER PROMPT ===", flush=True)
@@ -1287,7 +1387,7 @@ def call_llm(
     if not raw_content:
         return None, prompt_tokens, completion_tokens, error_message
 
-    if debug:
+    if debug_output:
         print("=== LLM RESPONSE ===", flush=True)
         print(raw_content, flush=True)
         print("====================", flush=True)
@@ -1352,6 +1452,7 @@ def process_conversation(
         "conversation_start": format_timestamp(metrics.conversation_start),
         "conversation_end": format_timestamp(metrics.conversation_end),
         "duration_minutes": format_minutes(metrics.duration_minutes),
+        "duration_to_resolution": "",
         "first_agent_response_minutes": format_minutes(metrics.first_agent_response_minutes),
         "avg_agent_response_minutes": format_minutes(metrics.avg_agent_response_minutes),
         "avg_customer_response_minutes": format_minutes(metrics.avg_customer_response_minutes),
@@ -1369,7 +1470,6 @@ def process_conversation(
         "customer_abuse_count": str(metrics.customer_abuse_count),
         "llm_summary_250": "",
         "conversation_rating": "",
-        "extract_customer_problem": "",
         "problem_extract": "",
         "resolution_extract": "",
         "steps_extract": "[]",
@@ -1379,11 +1479,13 @@ def process_conversation(
         "contact_reason_original": contact_reason_original,
         "contact_reason_change": "",
         "reason_override_why": "",
-        "contact_reason_change_justification": "",
-        "llm_conatct_reason_change": "",
         "resolution_why": "",
         "customer_sentiment_primary": "",
         "customer_sentiment_scores": "",
+        "agent_profanity_detected": "",
+        "agent_profanity_count": "",
+        "customer_abuse_detected": "",
+        "customer_abuse_count": "",
         "agent_score": "",
         "customer_score": "",
         "resolved": "",
@@ -1407,7 +1509,6 @@ def process_conversation(
     row["conversation_rating"] = str(rating).strip() if rating is not None else ""
 
     problem_extract = normalized_llm.get("problem_extract", "")
-    row["extract_customer_problem"] = problem_extract
     row["problem_extract"] = problem_extract
     row["resolution_extract"] = normalized_llm.get("resolution_extract", "")
 
@@ -1415,9 +1516,6 @@ def process_conversation(
     row["contact_reason_change"] = "true" if normalized_llm.get("contact_reason_change") else "false"
     reason_override = normalized_llm.get("reason_override_why", "")
     row["reason_override_why"] = reason_override
-    row["contact_reason_change_justification"] = normalized_llm.get("contact_reason_change_justification", reason_override)
-    row["llm_conatct_reason_change"] = normalized_llm.get("llm_conatct_reason_change", reason_override)
-
     row["resolution_why"] = normalized_llm.get("resolution_why", "")
 
     steps_value = normalized_llm.get("steps_extract", [])
@@ -1427,6 +1525,15 @@ def process_conversation(
 
     resolution_timestamp_iso = normalized_llm.get("resolution_timestamp_iso") or ""
     row["resolution_timestamp_iso"] = resolution_timestamp_iso
+
+    duration_to_resolution = ""
+    if resolution_timestamp_iso and metrics.conversation_start:
+        resolved_dt = parse_datetime(resolution_timestamp_iso)
+        if resolved_dt and metrics.conversation_start:
+            minutes = minutes_between(metrics.conversation_start, resolved_dt)
+            if minutes >= 0:
+                duration_to_resolution = format_minutes(minutes)
+    row["duration_to_resolution"] = duration_to_resolution
 
     resolution_index = normalized_llm.get("resolution_message_index")
     row["resolution_message_index"] = str(resolution_index) if resolution_index is not None else ""
@@ -1444,6 +1551,30 @@ def process_conversation(
     row["customer_sentiment_primary"] = sentiment_primary
     sentiment_scores = normalized_llm.get("customer_sentiment_scores", {})
     row["customer_sentiment_scores"] = json.dumps(sentiment_scores)
+
+    agent_prof_flag = normalized_llm.get("agent_profanity_detected")
+    if isinstance(agent_prof_flag, bool):
+        row["agent_profanity_detected"] = "true" if agent_prof_flag else "false"
+    else:
+        row["agent_profanity_detected"] = "true" if metrics.agent_profanity_count > 0 else "false"
+
+    agent_prof_count = normalized_llm.get("agent_profanity_count")
+    if isinstance(agent_prof_count, int) and agent_prof_count >= 0:
+        row["agent_profanity_count"] = str(agent_prof_count)
+    else:
+        row["agent_profanity_count"] = str(metrics.agent_profanity_count)
+
+    customer_abuse_flag = normalized_llm.get("customer_abuse_detected")
+    if isinstance(customer_abuse_flag, bool):
+        row["customer_abuse_detected"] = "true" if customer_abuse_flag else "false"
+    else:
+        row["customer_abuse_detected"] = "true" if metrics.customer_abuse_count > 0 else "false"
+
+    customer_abuse_count = normalized_llm.get("customer_abuse_count")
+    if isinstance(customer_abuse_count, int) and customer_abuse_count >= 0:
+        row["customer_abuse_count"] = str(customer_abuse_count)
+    else:
+        row["customer_abuse_count"] = str(metrics.customer_abuse_count)
     return row
 
 
@@ -1459,6 +1590,8 @@ def run_convo_quality(
     openai_client: Optional[Tuple[str, Any]],
     max_conversations: int,
     debug: bool,
+    concurrency: int,
+    debug_prompts: str,
     verbose: bool,
     resume: bool,
     payload_dir: Optional[Path],
@@ -1466,6 +1599,7 @@ def run_convo_quality(
     adjusted_temperature: Optional[float] = temperature
     if use_llm and not model_supports_temperature(model):
         adjusted_temperature = None
+    concurrency = max(1, concurrency)
 
     fieldnames = list(CSV_FIELDS)
     ensure_header(output_path, fieldnames)
@@ -1475,7 +1609,6 @@ def run_convo_quality(
     total_completion_tokens = 0
     total_cost_usd = 0.0
 
-    # Determine total records for progress/verbose reporting
     total_records = 0
     with input_path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -1488,132 +1621,217 @@ def run_convo_quality(
     skipped = 0
 
     should_call_llm = use_llm and payload_dir is None
+    show_prompt_input = debug_prompts in {"input", "both"}
+    show_prompt_output = debug_prompts in {"output", "both"}
+
     iterator = load_jsonl(input_path, max_conversations)
     progress = tqdm(
-        iterator,
+        total=total_records if total_records else None,
         desc="Processing conversations",
         unit="conversation",
-        total=total_records if total_records else None,
     )
     if payload_dir:
         payload_dir.mkdir(parents=True, exist_ok=True)
 
-    for idx, record in enumerate(progress, start=1):
+    use_parallel = should_call_llm and concurrency > 1
+    executor = ThreadPoolExecutor(max_workers=concurrency) if use_parallel else None
+    futures_map: Dict[Any, int] = {}
+    pending_results: Dict[int, Dict[str, Any]] = {}
+    next_result_index = 1
+    job_sequence = 0
+
+    def execute_job(job: Dict[str, Any]) -> Dict[str, Any]:
+        record = job["record"]
+        metrics = job["metrics"]
+        comments = job["comments"]
+        issue_key = job["issue_key"]
+        llm_payload: Optional[Dict[str, Any]] = None
+        prompt_tokens: Optional[int] = None
+        completion_tokens: Optional[int] = None
+        cost_usd: Optional[float] = None
+        error_msg: Optional[str] = None
+        reasoning_tokens = 0
+
+        if job["should_call_llm"] and comments:
+            llm_payload, prompt_tokens, completion_tokens, error_msg = call_llm(
+                openai_client=job["openai_client"],
+                model=job["model"],
+                temperature=job["temperature"],
+                max_completion_tokens=job["max_output_tokens"],
+                system_prompt=job["system_prompt"],
+                user_prompt=job["user_prompt"],
+                debug=job["debug"],
+                debug_input=job["show_prompt_input"],
+                debug_output=job["show_prompt_output"],
+            )
+            cost_usd = estimate_cost(job["model"], prompt_tokens, completion_tokens)
+            if isinstance(llm_payload, dict) and "_reasoning_tokens" in llm_payload:
+                try:
+                    reasoning_tokens = int(llm_payload["_reasoning_tokens"] or 0)
+                except Exception:
+                    reasoning_tokens = 0
+            if job["debug"] and job["should_call_llm"]:
+                print(
+                    f"[debug] tokens prompt={prompt_tokens or 0} completion={completion_tokens or 0} "
+                    f"cost=${cost_usd or 0.0:.6f}"
+                )
+            if error_msg and job["debug"] and not llm_payload:
+                print(f"[debug] LLM note: {error_msg}")
+                llm_payload = {
+                    "llm_summary_250": error_msg,
+                    "conversation_rating": "",
+                    "extract_customer_probelm": "",
+                    "contact_reason": "",
+                    "agent_score": "",
+                    "customer_score": "",
+                    "resolved": "",
+                    "improvement_tip": "",
+                }
+
+        row = process_conversation(
+            record,
+            metrics,
+            llm_payload,
+            job["model"] if job["should_call_llm"] else "",
+            prompt_tokens,
+            completion_tokens,
+            cost_usd,
+        )
+
+        return {
+            "job_index": job["job_index"],
+            "issue_key": issue_key,
+            "row": row,
+            "llm_payload": llm_payload,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "cost_usd": cost_usd,
+            "metrics": metrics,
+            "should_call_llm": job["should_call_llm"],
+            "no_llm_response": job["should_call_llm"] and llm_payload is None,
+        }
+
+    def handle_result(result: Dict[str, Any]) -> None:
+        nonlocal processed, total_prompt_tokens, total_completion_tokens, total_cost_usd
+        append_row(output_path, fieldnames, result["row"])
+        processed += 1
+        progress.update(1)
+        issue_key_local = result["issue_key"]
+        skip_issue_keys.add(issue_key_local)
+
+        if result["should_call_llm"]:
+            if result["prompt_tokens"] is not None:
+                total_prompt_tokens += result["prompt_tokens"] or 0
+            if result["completion_tokens"] is not None:
+                total_completion_tokens += result["completion_tokens"] or 0
+            if result["cost_usd"] is not None:
+                total_cost_usd += result["cost_usd"] or 0.0
+        if debug and result["no_llm_response"]:
+            progress.write(f"[debug] No parsed LLM response for {issue_key_local}; check raw output above.")
+
+        if verbose:
+            rating_info = ""
+            tokens_info = ""
+            cost_info = ""
+            llm_payload = result["llm_payload"]
+            if isinstance(llm_payload, dict):
+                rating = llm_payload.get("conversation_rating")
+                if rating not in (None, ""):
+                    rating_info = f" rating={rating}"
+            if result["should_call_llm"]:
+                ct = result["completion_tokens"] or 0
+                tokens_info = f" tokens={ct} (reasoning {result['reasoning_tokens']})"
+                if result["cost_usd"] is not None:
+                    cost_info = f" cost=${total_cost_usd:.6f}"
+            metrics = result["metrics"]
+            metrics_summary = (
+                f"messages={metrics.messages_total} turns={metrics.turns} "
+                f"duration={format_minutes(metrics.duration_minutes) or 'n/a'}"
+            )
+            progress.write(
+                f"Processed {processed}/{total_records or processed}: {issue_key_local} | {metrics_summary}"
+                f"{rating_info}{tokens_info}{cost_info}"
+            )
+
+    def drain_futures(force: bool = False) -> None:
+        nonlocal next_result_index
+        if not futures_map:
+            return
+        wait_kwargs: Dict[str, Any] = {}
+        if not force:
+            wait_kwargs["return_when"] = FIRST_COMPLETED
+        done, _ = wait(list(futures_map.keys()), **wait_kwargs)
+        for fut in done:
+            job_idx = futures_map.pop(fut)
+            pending_results[job_idx] = fut.result()
+        while next_result_index in pending_results:
+            handle_result(pending_results.pop(next_result_index))
+            next_result_index += 1
+
+    for record in iterator:
+        issue_key = str(record.get("issue_key", ""))
+        if issue_key in skip_issue_keys:
+            skipped += 1
+            if verbose:
+                progress.write(f"[skip] {issue_key} already present in {output_path.name}")
+            progress.update(1)
+            continue
+
         raw_comments = record.get("comments") or []
         if not isinstance(raw_comments, list):
             raw_comments = []
         comments = parse_comments(raw_comments)
         metrics = compute_metrics(comments)
         transcript = build_transcript(comments)
-
-        issue_key = str(record.get("issue_key", ""))
-        if issue_key in skip_issue_keys:
-            skipped += 1
-            if verbose:
-                progress.write(f"[skip] {issue_key} already present in {output_path.name}")
-            continue
-
-        llm_payload: Optional[Dict[str, Any]] = None
-        prompt_tokens: Optional[int] = None
-        completion_tokens: Optional[int] = None
-        cost_usd: Optional[float] = None
         system_prompt, user_prompt = build_llm_prompts(record, metrics, transcript, taxonomy)
 
         if payload_dir:
-            payload = build_request_payload(
-                model=model,
-                temperature=adjusted_temperature,
-                max_completion_tokens=max_output_tokens,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
-            safe_issue = re.sub(r"[^A-Za-z0-9_-]", "_", issue_key or f"idx{idx}") or f"idx{idx}"
-            model_tag = re.sub(r"[^A-Za-z0-9_-]", "_", model)
-            payload_path = payload_dir / f"payload_{idx:04d}_{model_tag}_{safe_issue}.json"
+            safe_issue = re.sub(r"[^A-Za-z0-9_-]", "_", issue_key or "job")
+            payload_path = payload_dir / f"payload_{processed + skipped + 1:04d}_{model.replace('.', '_')}_{safe_issue}.json"
+            payload = {
+                "model": model,
+                "temperature": adjusted_temperature,
+                "max_completion_tokens": max_output_tokens,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+            }
             payload_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             if verbose:
                 progress.write(f"[payload] wrote {payload_path}")
 
-        if should_call_llm and comments:
-            llm_payload, prompt_tokens, completion_tokens, error_msg = call_llm(
-                openai_client=openai_client,
-                model=model,
-                temperature=adjusted_temperature,
-                max_completion_tokens=max_output_tokens,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                debug=debug,
-            )
-            cost_usd = estimate_cost(model, prompt_tokens, completion_tokens)
-            if prompt_tokens is not None:
-                total_prompt_tokens += prompt_tokens
-            if completion_tokens is not None:
-                total_completion_tokens += completion_tokens
-            if isinstance(llm_payload, dict) and "_reasoning_tokens" in llm_payload:
-                try:
-                    total_reasoning_tokens += int(llm_payload["_reasoning_tokens"])
-                except Exception:
-                    pass
-            if cost_usd is not None:
-                total_cost_usd += cost_usd
-            if debug and should_call_llm:
-                print(
-                    f"[debug] tokens prompt={prompt_tokens or 0} completion={completion_tokens or 0} "
-                    f"cost=${cost_usd or 0.0:.6f}"
-                )
-            if error_msg and debug:
-                print(f"[debug] LLM note: {error_msg}")
-                if not llm_payload:
-                    llm_payload = {
-                        "llm_summary_250": error_msg,
-                        "conversation_rating": "",
-                        "extract_customer_probelm": "",
-                        "contact_reason": "",
-                        "agent_score": "",
-                        "customer_score": "",
-                        "resolved": "",
-                        "improvement_tip": "",
-                    }
+        job_sequence += 1
+        job_data = {
+            "job_index": job_sequence,
+            "record": record,
+            "issue_key": issue_key,
+            "comments": comments,
+            "metrics": metrics,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "model": model,
+            "temperature": adjusted_temperature,
+            "max_output_tokens": max_output_tokens,
+            "should_call_llm": should_call_llm,
+            "openai_client": openai_client,
+            "debug": debug,
+            "show_prompt_input": show_prompt_input,
+            "show_prompt_output": show_prompt_output,
+        }
 
-        row = process_conversation(
-            record,
-            metrics,
-            llm_payload,
-            model if should_call_llm else "",
-            prompt_tokens,
-            completion_tokens,
-            cost_usd,
-        )
-        if debug and should_call_llm and llm_payload is None:
-            progress.write(f"[debug] No parsed LLM response for {issue_key}; check raw output above.")
-        append_row(output_path, fieldnames, row)
-        processed += 1
-        skip_issue_keys.add(issue_key)
-        if verbose:
-            rating_info = ''
-            tokens_info = ''
-            cost_info = ''
-            if llm_payload and isinstance(llm_payload, dict):
-                rating = llm_payload.get("conversation_rating")
-                if rating not in (None, ""):
-                    rating_info = f" rating={rating}"
-            if should_call_llm:
-                pt = prompt_tokens or 0
-                ct = completion_tokens or 0
-                rt = 0
-                if isinstance(llm_payload, dict):
-                    rt = int(llm_payload.get("_reasoning_tokens", 0) or 0)
-                tokens_info = f" tokens={ct} (reasoning {rt})"
-                if cost_usd is not None:
-                    cost_info = f" cost=${total_cost_usd:.6f}"
-            metrics_summary = (
-                f"messages={metrics.messages_total} turns={metrics.turns} "
-                f"duration={format_minutes(metrics.duration_minutes) or 'n/a'}"
-            )
-            progress.write(
-                f"Processed {processed}/{total_records or processed}: {issue_key} | {metrics_summary}"
-                f"{rating_info}{tokens_info}{cost_info}"
-            )
+        if executor:
+            future = executor.submit(execute_job, job_data)
+            futures_map[future] = job_sequence
+            if len(futures_map) >= concurrency:
+                drain_futures()
+        else:
+            result = execute_job(job_data)
+            handle_result(result)
+            next_result_index += 1
+
+    if executor:
+        drain_futures(force=True)
+        executor.shutdown(wait=True)
 
     progress.close()
 
@@ -1629,6 +1847,7 @@ def run_convo_quality(
     return processed, total_prompt_tokens + total_completion_tokens, total_cost_usd
 
 
+
 def main() -> int:
     args = parse_args()
     benchmark_models = args.benchmark_models or [args.model]
@@ -1639,6 +1858,10 @@ def main() -> int:
 
     taxonomy = load_taxonomy(args.taxonomy_file)
     payload_dir = Path(args.generate_payloads).resolve() if args.generate_payloads else None
+
+    debug_prompts_choice = args.debug_prompts or "none"
+    if args.debug and debug_prompts_choice == "none":
+        debug_prompts_choice = "both"
 
     for idx, model in enumerate(benchmark_models, start=1):
         if args.output:
@@ -1675,6 +1898,8 @@ def main() -> int:
             openai_client=openai_client,
             max_conversations=args.max_conversations,
             debug=args.debug,
+            concurrency=args.concurrency,
+            debug_prompts=debug_prompts_choice,
             verbose=args.verbose,
             resume=args.resume,
             payload_dir=payload_dir,

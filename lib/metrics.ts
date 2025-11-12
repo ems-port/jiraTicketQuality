@@ -94,6 +94,7 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
   );
   const agent = agentList[0] ?? asString(raw.agent) ?? "Unassigned";
   const durationMinutes = asNumber(raw.duration_minutes);
+  const durationToResolutionMinutes = asNumber(raw.duration_to_resolution);
 
   const escalated = agentList.filter(Boolean).length > 1;
 
@@ -106,6 +107,7 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
     startedAt,
     endedAt,
     durationMinutes,
+    durationToResolutionMinutes,
     firstAgentResponseMinutes: asNumber(raw.first_agent_response_minutes),
     avgAgentResponseMinutes: asNumber(raw.avg_agent_response_minutes),
     messagesTotal: asNumber(raw.messages_total),

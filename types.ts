@@ -30,6 +30,7 @@ export interface ConversationRow {
   startedAt: Date | null;
   endedAt: Date | null;
   durationMinutes: number | null;
+  durationToResolutionMinutes: number | null;
   firstAgentResponseMinutes: number | null;
   avgAgentResponseMinutes: number | null;
   messagesTotal: number | null;

@@ -11,6 +11,7 @@ from analysis.convo_quality import (
   process_conversation
 )
 
+ARTIFACT_PATH = Path("tests/artifacts/reasoning_schema_snapshot.jsonl")
 
 class ReasoningSchemaTestCase(unittest.TestCase):
   def test_first_twenty_tickets_emit_reasoning_fields(self) -> None:
@@ -18,6 +19,7 @@ class ReasoningSchemaTestCase(unittest.TestCase):
     records = list(load_jsonl(dataset_path, limit=20))
     self.assertEqual(len(records), 20, "Fixture must provide 20 conversations for the regression test.")
 
+    artifact_rows = []
     for record in records:
       comments = list(parse_comments(record.get("comments", [])))
       metrics = compute_metrics(comments)
@@ -29,10 +31,13 @@ class ReasoningSchemaTestCase(unittest.TestCase):
       self.assertEqual(row["contact_reason_change"], "true")
       self.assertEqual(row["is_resolved"], "true")
       self.assertEqual(row["resolved"], "true")
-      self.assertEqual(row["problem_extract"], row["extract_customer_problem"])
+      self.assertTrue(row["problem_extract"])
       self.assertTrue(row["resolution_extract"])
+      self.assertLessEqual(len(row["resolution_extract"].split()), 15)
       self.assertTrue(row["resolution_timestamp_iso"])
       self.assertTrue(row["resolution_message_index"])
+      if row["resolution_timestamp_iso"]:
+        self.assertTrue(row["duration_to_resolution"])
 
       steps = json.loads(row["steps_extract"])
       self.assertIsInstance(steps, list)
@@ -43,6 +48,11 @@ class ReasoningSchemaTestCase(unittest.TestCase):
       total = sum(sentiment_scores.values())
       self.assertTrue(abs(total - 1.0) <= 0.02)
       self.assertEqual(row["customer_sentiment_primary"], "Frustration")
+      self.assertIn(row["agent_profanity_detected"], {"true", "false"})
+      self.assertIn(row["customer_abuse_detected"], {"true", "false"})
+      artifact_rows.append(_denormalise_row(row))
+
+    _write_artifact(artifact_rows)
 
 
 def build_stub_payload(record, comments, metrics):
@@ -75,7 +85,7 @@ def build_stub_payload(record, comments, metrics):
     "conversation_rating": 4,
     "extract_customer_probelm": first_customer_quote[:250],
     "problem_extract": first_customer_quote[:250],
-    "resolution_extract": (agent_close or "Agent confirmed fix")[:250],
+    "resolution_extract": "Agent closed ticket after confirming manual fix.",
     "contact_reason": contact_reason,
     "contact_reason_change": True,
     "reason_override_why": f'Customer mention "{first_customer_quote[:60]}" required retagging.',
@@ -90,6 +100,10 @@ def build_stub_payload(record, comments, metrics):
     "customer_sentiment_primary": "Frustration",
     "customer_sentiment_scores": sentiment_scores,
     "improvement_tip": "Confirm resolution timestamp inside the ticket summary.",
+    "agent_profanity_detected": False,
+    "agent_profanity_count": 0,
+    "customer_abuse_detected": False,
+    "customer_abuse_count": 0,
   }
 
 
@@ -107,6 +121,27 @@ def _agent_steps(comments) -> List[str]:
     snippet = (comment.text or "").strip()
     steps.append(f"Step {idx}: ({timestamp}) {snippet[:160]}")
   return steps
+
+
+def _denormalise_row(row: dict) -> dict:
+  serialised = dict(row)
+  try:
+    serialised["steps_extract"] = json.loads(row.get("steps_extract") or "[]")
+  except json.JSONDecodeError:
+    serialised["steps_extract"] = []
+  try:
+    serialised["customer_sentiment_scores"] = json.loads(row.get("customer_sentiment_scores") or "{}")
+  except json.JSONDecodeError:
+    serialised["customer_sentiment_scores"] = {}
+  return serialised
+
+
+def _write_artifact(rows: List[dict]) -> None:
+  ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
+  with ARTIFACT_PATH.open("w", encoding="utf-8") as handle:
+    for row in rows:
+      handle.write(json.dumps(row, ensure_ascii=False))
+      handle.write("\n")
 
 
 if __name__ == "__main__":
