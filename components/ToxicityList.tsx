@@ -1,5 +1,6 @@
 import { DisplayName } from "@/components/DisplayName";
-import { ToxicityEntry } from "@/types";
+import { resolveAgentRole } from "@/lib/roles";
+import { AgentRole, ToxicityEntry } from "@/types";
 
 const JIRA_BASE_URL = "https://portapp.atlassian.net/browse/";
 
@@ -11,6 +12,8 @@ type ToxicityListProps = {
   mapping: Record<string, string>;
   deAnonymize: boolean;
   entityLabel?: string;
+  showAgentRoles?: boolean;
+  roleMapping?: Record<string, AgentRole>;
 };
 
 export function ToxicityList({
@@ -20,7 +23,9 @@ export function ToxicityList({
   emptyLabel,
   mapping,
   deAnonymize,
-  entityLabel = "Entity"
+  entityLabel = "Entity",
+  showAgentRoles = false,
+  roleMapping = {} as Record<string, AgentRole>
 }: ToxicityListProps) {
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
@@ -41,6 +46,10 @@ export function ToxicityList({
                   mapping={mapping}
                   deAnonymize={deAnonymize}
                   titlePrefix={entityLabel}
+                  showRole={showAgentRoles}
+                  role={
+                    showAgentRoles ? resolveAgentRole(entry.entity, roleMapping) : undefined
+                  }
                 />
               </p>
               <span className="rounded-full bg-red-500/20 px-3 py-1 text-xs font-semibold text-red-200">

@@ -14,7 +14,7 @@ import {
   filterByWindow,
   normaliseRow
 } from "@/lib/metrics";
-import type { ConversationRow, SettingsState } from "@/types";
+import type { AgentRole, ConversationRow, SettingsState } from "@/types";
 
 const NOW = new Date("2024-04-10T12:00:00.000Z");
 
@@ -51,6 +51,17 @@ function makeRow(overrides: Partial<ConversationRow>): ConversationRow {
     ticketSummary: overrides.ticketSummary ?? "Ticket summary placeholder",
     contactReason: overrides.contactReason ?? "Billing",
     contactReasonOriginal: overrides.contactReasonOriginal ?? "Billing",
+    contactReasonChange: overrides.contactReasonChange ?? false,
+    reasonOverrideWhy: overrides.reasonOverrideWhy ?? null,
+    resolutionWhy: overrides.resolutionWhy ?? null,
+    problemExtract: overrides.problemExtract ?? null,
+    resolutionExtract: overrides.resolutionExtract ?? null,
+    stepsExtract: overrides.stepsExtract ?? [],
+    resolutionTimestampIso: overrides.resolutionTimestampIso ?? null,
+    resolutionTimestamp: overrides.resolutionTimestamp ?? null,
+    resolutionMessageIndex: overrides.resolutionMessageIndex ?? null,
+    customerSentimentPrimary: overrides.customerSentimentPrimary ?? null,
+    customerSentimentScores: overrides.customerSentimentScores ?? null,
     hub: overrides.hub ?? "Hub A",
     model: overrides.model ?? "gpt-4o",
     agentToxicityScore: overrides.agentToxicityScore ?? null,
@@ -119,6 +130,13 @@ describe("time window helpers", () => {
   });
 });
 
+const roleMapping: Record<string, AgentRole> = {
+  "Agent Alpha": "TIER1",
+  "Agent Beta": "TIER2",
+  "Agent Matrix": "TIER1",
+  "Agent Assist": "TIER2"
+};
+
 describe("headline metrics", () => {
   const rows = [
     makeRow({ totalScore: 4, resolved: true }),
@@ -132,7 +150,8 @@ describe("headline metrics", () => {
 
   it("counts resolved and escalated conversations", () => {
     expect(computeResolvedCount(rows)).toBe(1);
-    expect(computeEscalatedCount(rows)).toBe(1);
+    expect(computeEscalatedCount(rows, roleMapping, "handoff")).toBe(0);
+    expect(computeEscalatedCount(rows, roleMapping, "tier")).toBe(0);
   });
 
   it("computes resolved stats and series with percentages", () => {
@@ -250,7 +269,10 @@ describe("computeAgentMatrix", () => {
   ];
 
   it("aggregates agent performance metrics per time window", () => {
-    const matrix = computeAgentMatrix(rows, "30d", NOW);
+    const matrix = computeAgentMatrix(rows, "30d", NOW, {
+      roleMapping,
+      escalationMetric: "handoff"
+    });
     const agentRow = matrix.find((entry) => entry.agent === "Agent Matrix");
     expect(agentRow?.avgFirstResponseMinutes).toBeCloseTo(7.5);
     expect(agentRow?.resolvedRate).toBeCloseTo(0.5);

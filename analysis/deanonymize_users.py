@@ -4,8 +4,8 @@ Build a lookup table that maps Jira account identifiers to display names.
 
 The script scans CSV exports matching ``jira*.csv`` inside ``local_data`` by
 default, extracts both agent (Assignee) and customer (Reporter) identifiers,
-and writes a denormalised lookup CSV with the columns ``user_id`` and
-``display_name``.
+and writes a denormalised lookup CSV with the columns ``user_id``,
+``display_name``, and ``port_role``.
 
 Example:
     python analysis/deanonymize_users.py \\
@@ -21,12 +21,25 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Dict
+try:  # Allow running as a module or a script inside ``analysis``.
+    from .port_roles import (
+        determine_port_role,
+        load_port_role_lookup,
+        PortRoleLookup,
+    )
+except ImportError:  # pragma: no cover - script execution fallback
+    from port_roles import (
+        determine_port_role,
+        load_port_role_lookup,
+        PortRoleLookup,
+    )
 
 
 ASSIGNEE_ID_COL = "Assignee Id"
 ASSIGNEE_NAME_COL = "Assignee"
 REPORTER_ID_COL = "Reporter Id"
 REPORTER_NAME_COL = "Reporter"
+
 
 
 @dataclass
@@ -95,15 +108,16 @@ def add_user(records: Dict[str, NameRecord], user_id: str, display_name: str) ->
     record.add(display_name)
 
 
-def write_lookup_csv(output_path: Path, records: Dict[str, NameRecord]) -> None:
+def write_lookup_csv(output_path: Path, records: Dict[str, NameRecord], port_lookup: PortRoleLookup) -> None:
     """Write the aggregated lookup table to ``output_path`` sorted by user id."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["user_id", "display_name"])
+        writer.writerow(["user_id", "display_name", "port_role"])
         for user_id in sorted(records):
             record = records[user_id]
-            writer.writerow([user_id, record.primary])
+            port_role = determine_port_role(user_id, record.primary, port_lookup)
+            writer.writerow([user_id, record.primary, port_role])
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,6 +138,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("local_data/user_lookup.csv"),
         help="Destination CSV path for the denormalised lookup (default: local_data/user_lookup.csv).",
+    )
+    parser.add_argument(
+        "--port-roles",
+        type=Path,
+        default=Path("data/port_roles.csv"),
+        help="CSV with manual Port role overrides (default: data/port_roles.csv).",
     )
     return parser.parse_args()
 
@@ -148,7 +168,9 @@ def main() -> None:
     # Track user ids that appeared with multiple display names.
     conflicts = {uid: rec.alternates for uid, rec in records.items() if rec.alternates}
 
-    write_lookup_csv(args.output, records)
+    port_lookup = load_port_role_lookup(args.port_roles)
+
+    write_lookup_csv(args.output, records, port_lookup)
 
     total_users = len(records)
 

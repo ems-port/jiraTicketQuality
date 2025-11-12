@@ -1,14 +1,22 @@
 import { DisplayName } from "@/components/DisplayName";
-import { AgentPerformance, AgentPerformancePoint } from "@/types";
+import { resolveAgentRole } from "@/lib/roles";
+import { AgentPerformance, AgentPerformancePoint, AgentRole } from "@/types";
 
 type AgentRankListProps = {
   title: string;
   agents: AgentPerformance[];
   mapping: Record<string, string>;
   deAnonymize: boolean;
+  roleMapping: Record<string, AgentRole>;
 };
 
-export function AgentRankList({ title, agents, mapping, deAnonymize }: AgentRankListProps) {
+export function AgentRankList({
+  title,
+  agents,
+  mapping,
+  deAnonymize,
+  roleMapping
+}: AgentRankListProps) {
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
       <header className="mb-4 flex items-baseline justify-between">
@@ -32,6 +40,8 @@ export function AgentRankList({ title, agents, mapping, deAnonymize }: AgentRank
                     mapping={mapping}
                     deAnonymize={deAnonymize}
                     titlePrefix="Agent ID"
+                    showRole={true}
+                    role={resolveAgentRole(agent.agent, roleMapping)}
                   />
                 </p>
                 <span className="text-sm font-semibold text-brand-200">

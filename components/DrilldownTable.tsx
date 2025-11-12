@@ -5,7 +5,9 @@ import clsx from "clsx";
 import { DisplayName } from "@/components/DisplayName";
 import { formatDateTimeLocal } from "@/lib/date";
 import { resolveDisplayName } from "@/lib/displayNames";
-import { ConversationRow } from "@/types";
+import { getEscalationDetails } from "@/lib/escalations";
+import { resolveAgentRole } from "@/lib/roles";
+import { AgentRole, ConversationRow } from "@/types";
 
 const JIRA_BASE_URL = "https://portapp.atlassian.net/browse/";
 
@@ -16,6 +18,9 @@ type SortKey =
   | "agentLabel"
   | "customerLabel"
   | "resolved"
+  | "handoffAny"
+  | "escalatedTier"
+  | "escalationPath"
   | "agentScore"
   | "customerScore"
   | "startedAt"
@@ -32,12 +37,17 @@ type DrilldownTableProps = {
   onClose: () => void;
   mapping: Record<string, string>;
   deAnonymize: boolean;
+  roleMapping: Record<string, AgentRole>;
 };
 
 type TableRow = {
   issueKey: string;
   agentId: string;
   agentLabel: string;
+  agentRole: AgentRole;
+  handoffAny: boolean;
+  escalatedTier: boolean;
+  escalationPath: string;
   customerId: string;
   customerLabel: string;
   resolved: boolean;
@@ -57,6 +67,9 @@ const HEADERS: { key: SortKey; label: string }[] = [
   { key: "agentLabel", label: "Agent" },
   { key: "customerLabel", label: "Customer" },
   { key: "resolved", label: "Resolved" },
+  { key: "handoffAny", label: "Handovers T1→Any" },
+  { key: "escalatedTier", label: "Escalation T1→T2" },
+  { key: "escalationPath", label: "Escalation path" },
   { key: "agentScore", label: "Agent Score" },
   { key: "customerScore", label: "Customer Score" },
   { key: "startedAt", label: "Started" },
@@ -73,7 +86,8 @@ export function DrilldownTable({
   rows,
   onClose,
   mapping,
-  deAnonymize
+  deAnonymize,
+  roleMapping
 }: DrilldownTableProps) {
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "endedAt",
@@ -87,10 +101,16 @@ export function DrilldownTable({
         const customerId = row.customerList[0] ?? "Customer";
         const customerDisplay = resolveDisplayName(customerId, mapping, deAnonymize);
         const abusiveReason = buildAbusiveReason(row);
+        const agentRole = resolveAgentRole(row.agent, roleMapping);
+        const escalation = getEscalationDetails(row, roleMapping);
         return {
           issueKey: row.issueKey,
           agentId: row.agent,
           agentLabel: agentDisplay.label,
+          agentRole,
+          handoffAny: escalation.handoffAny,
+          escalatedTier: escalation.tierHandoff,
+          escalationPath: escalation.path,
           customerId,
           customerLabel: customerDisplay.label,
           resolved: row.resolved,
@@ -105,7 +125,7 @@ export function DrilldownTable({
           ticketSummary: row.ticketSummary ?? ""
         };
       }),
-    [rows, mapping, deAnonymize]
+    [rows, mapping, deAnonymize, roleMapping]
   );
 
   const sortedRows = useMemo(() => {
@@ -126,7 +146,13 @@ export function DrilldownTable({
     const csv = Papa.unparse(
       sortedRows.map((row) => ({
         issue_key: row.issueKey,
+        agent_id: row.agentId,
         agent: row.agentLabel,
+        agent_role: row.agentRole,
+        handover_t1_any: row.handoffAny ? "Yes" : "No",
+        escalated_tier_handoff: row.escalatedTier ? "Yes" : "No",
+        escalation_path: row.escalationPath,
+        customer_id: row.customerId,
         resolved: row.resolved ? "Yes" : "No",
         agent_score: row.agentScore ?? "",
         customer_score: row.customerScore ?? "",
@@ -246,6 +272,8 @@ export function DrilldownTable({
                       mapping={mapping}
                       deAnonymize={deAnonymize}
                       titlePrefix="Agent ID"
+                      showRole={true}
+                      role={row.agentRole}
                     />
                   </td>
                   <td className="px-4 py-3">
@@ -262,6 +290,23 @@ export function DrilldownTable({
                     ) : (
                       <span className="text-slate-300">No</span>
                     )}
+                  </td>
+                  <td className="px-4 py-3">
+                    {row.handoffAny ? (
+                      <span className="text-amber-200">Yes</span>
+                    ) : (
+                      <span className="text-slate-300">No</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    {row.escalatedTier ? (
+                      <span className="text-brand-200">Yes</span>
+                    ) : (
+                      <span className="text-slate-300">No</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-slate-200">
+                    {row.escalationPath ? row.escalationPath : "—"}
                   </td>
                   <td className="px-4 py-3">{formatNumber(row.agentScore)}</td>
                   <td className="px-4 py-3">{formatNumber(row.customerScore)}</td>
@@ -333,7 +378,11 @@ function compareRows(a: TableRow, b: TableRow, key: SortKey, direction: SortDire
       return a[key].localeCompare(b[key]) * multiplier;
     case "resolved":
     case "abusive":
+    case "handoffAny":
+    case "escalatedTier":
       return (numberValue(a[key]) - numberValue(b[key])) * multiplier;
+    case "escalationPath":
+      return a.escalationPath.localeCompare(b.escalationPath) * multiplier;
     case "agentScore":
     case "customerScore":
     case "durationMinutes":

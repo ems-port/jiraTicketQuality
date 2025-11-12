@@ -1,5 +1,20 @@
 export type TimeWindow = "24h" | "7d" | "30d";
 
+export type AgentRole = "TIER1" | "TIER2" | "NON_AGENT";
+export type EscalationMetricKind = "tier" | "handoff";
+
+export type SentimentLabel =
+  | "Delight"
+  | "Convenience"
+  | "Trust"
+  | "Frustration"
+  | "Disappointment"
+  | "Concern"
+  | "Hostility"
+  | "Neutral";
+
+export type SentimentScores = Record<SentimentLabel, number>;
+
 export interface SettingsState {
   toxicity_threshold: number;
   abusive_caps_trigger: number;
@@ -32,6 +47,17 @@ export interface ConversationRow {
   ticketSummary: string | null;
   contactReason: string | null;
   contactReasonOriginal: string | null;
+  contactReasonChange: boolean;
+  reasonOverrideWhy: string | null;
+  resolutionWhy: string | null;
+  problemExtract: string | null;
+  resolutionExtract: string | null;
+  stepsExtract: string[];
+  resolutionTimestampIso: string | null;
+  resolutionTimestamp: Date | null;
+  resolutionMessageIndex: number | null;
+  customerSentimentPrimary: SentimentLabel | null;
+  customerSentimentScores: SentimentScores | null;
   hub?: string | null;
   model?: string | null;
   agentToxicityScore?: number | null;
@@ -74,6 +100,13 @@ export interface AgentMatrixRow {
   avgAgentResponseMinutes: number | null;
   resolvedRate: number | null;
   escalatedCount: number;
+}
+
+export interface EscalationSeriesEntry {
+  window: TimeWindow;
+  tierCount: number;
+  handoffCount: number;
+  total: number;
 }
 
 export interface ImprovementTipEntry {

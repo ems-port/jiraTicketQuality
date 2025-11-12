@@ -1,15 +1,21 @@
 import {
+  AgentRole,
   AgentMatrixRow,
   AgentPerformance,
   AgentPerformancePoint,
   ContactReasonSummary,
   ConversationRow,
+  EscalationMetricKind,
+  EscalationSeriesEntry,
   ImprovementTipSummary,
   MetricSeries,
+  SentimentLabel,
+  SentimentScores,
   SettingsState,
   TimeWindow,
   ToxicityEntry
 } from "@/types";
+import { getEscalationDetails, isEscalated } from "@/lib/escalations";
 
 const TIME_WINDOW_DURATIONS: Record<TimeWindow, number> = {
   "24h": 24 * 60 * 60 * 1000,
@@ -23,6 +29,18 @@ const FIVE_DAYS_MS = 5 * DAY_MS;
 type PrimitiveRecord = Record<string, string | number | boolean | null | undefined>;
 
 const CLEAN_SPLIT_REGEX = /[;,|]/;
+const STEP_SPLIT_REGEX = /\|\|/;
+const MAX_STEP_ITEMS = 8;
+const SENTIMENT_LABELS: SentimentLabel[] = [
+  "Delight",
+  "Convenience",
+  "Trust",
+  "Frustration",
+  "Disappointment",
+  "Concern",
+  "Hostility",
+  "Neutral"
+];
 
 export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
   const agentList = normaliseList(asString(raw.agent_authors));
@@ -41,10 +59,35 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
   const contactReasonOriginalRaw = asString(raw.contact_reason_original ?? raw.custom_field_contact_reason);
   const contactReason = contactReasonRaw ? contactReasonRaw : null;
   const contactReasonOriginal = contactReasonOriginalRaw ? contactReasonOriginalRaw : null;
+  const contactReasonChange = asBoolean(raw.contact_reason_change);
+  const reasonOverrideRaw =
+    asString(raw.reason_override_why) ||
+    asString(raw.contact_reason_change_justification) ||
+    asString(raw.llm_conatct_reason_change);
+  const reasonOverrideWhy = reasonOverrideRaw ? reasonOverrideRaw : null;
+
+  const problemExtractRaw = asString(raw.problem_extract ?? raw.extract_customer_problem);
+  const problemExtract = problemExtractRaw ? problemExtractRaw : null;
+  const resolutionExtractRaw = asString(raw.resolution_extract);
+  const resolutionExtract = resolutionExtractRaw ? resolutionExtractRaw : null;
+  const resolutionWhyRaw = asString(raw.resolution_why);
+  const resolutionWhy = resolutionWhyRaw ? resolutionWhyRaw : null;
+  const stepsExtract = parseSteps(raw.steps_extract);
+
+  const resolutionTimestampIsoRaw = asString(raw.resolution_timestamp_iso);
+  const resolutionTimestampIso = resolutionTimestampIsoRaw || null;
+  const resolutionTimestamp = resolutionTimestampIso ? asDate(resolutionTimestampIso) : null;
+  const resolutionMessageIndexNumber = asNumber(raw.resolution_message_index);
+  const resolutionMessageIndex =
+    resolutionMessageIndexNumber === null ? null : Math.max(1, Math.round(resolutionMessageIndexNumber));
+
+  const sentimentScores = parseSentimentScores(raw.customer_sentiment_scores);
+  const sentimentPrimary = resolveSentimentPrimary(asString(raw.customer_sentiment_primary), sentimentScores);
 
   const statusString = asString(raw.status);
   const resolved = asBoolean(
-    raw.resolved ??
+    raw.is_resolved ??
+      raw.resolved ??
       (statusString
         ? ["done", "resolved", "closed"].includes(statusString.toLowerCase())
         : false)
@@ -80,6 +123,17 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
     ticketSummary,
     contactReason,
     contactReasonOriginal,
+    contactReasonChange,
+    reasonOverrideWhy,
+    resolutionWhy,
+    problemExtract,
+    resolutionExtract,
+    stepsExtract,
+    resolutionTimestampIso,
+    resolutionTimestamp,
+    resolutionMessageIndex,
+    customerSentimentPrimary: sentimentPrimary,
+    customerSentimentScores: sentimentScores,
     hub: (raw.custom_field_hub as string) ?? (raw.hub as string) ?? null,
     model: (raw.llm_model as string) ?? (raw.model as string) ?? null,
     agentToxicityScore: asNumber(raw.agent_toxicity_score),
@@ -119,6 +173,24 @@ export function buildMetricSeries(
     window,
     value: metric(filterByWindow(rows, window, now))
   }));
+}
+
+export function buildEscalationSeries(
+  rows: ConversationRow[],
+  roleMapping: Record<string, AgentRole>,
+  now: Date = new Date()
+): EscalationSeriesEntry[] {
+  return (Object.keys(TIME_WINDOW_DURATIONS) as TimeWindow[]).map((window) => {
+    const windowed = filterByWindow(rows, window, now);
+    const tierCount = windowed.filter((row) => isEscalated(row, roleMapping, "tier")).length;
+    const handoffCount = windowed.filter((row) => isEscalated(row, roleMapping, "handoff")).length;
+    return {
+      window,
+      tierCount,
+      handoffCount,
+      total: windowed.length
+    };
+  });
 }
 
 export function computeAverageConversationRating(rows: ConversationRow[]): number | null {
@@ -163,8 +235,12 @@ export function buildResolvedSeries(
   });
 }
 
-export function computeEscalatedCount(rows: ConversationRow[]): number {
-  return rows.filter((row) => row.escalated).length;
+export function computeEscalatedCount(
+  rows: ConversationRow[],
+  roleMapping: Record<string, AgentRole>,
+  metric: EscalationMetricKind = "tier"
+): number {
+  return rows.filter((row) => isEscalated(row, roleMapping, metric)).length;
 }
 
 export function computeImprovementTips(
@@ -467,8 +543,11 @@ export function computeFlaggedAgents(
 export function computeAgentMatrix(
   rows: ConversationRow[],
   window: TimeWindow,
-  now: Date = new Date()
+  now: Date = new Date(),
+  options?: { roleMapping?: Record<string, AgentRole>; escalationMetric?: EscalationMetricKind }
 ): AgentMatrixRow[] {
+  const roleMapping = options?.roleMapping ?? {};
+  const escalationMetric = options?.escalationMetric ?? "handoff";
   const windowed = filterByWindow(rows, window, now);
   const aggregations = new Map<
     string,
@@ -484,6 +563,11 @@ export function computeAgentMatrix(
   >();
 
   windowed.forEach((row) => {
+    const escalationDetails = getEscalationDetails(row, roleMapping);
+    const qualifies =
+      escalationMetric === "tier" ? escalationDetails.tierHandoff : escalationDetails.handoffAny;
+    const owner = escalationDetails.owner;
+
     row.agentList.forEach((agentName) => {
       const key = agentName || "Unassigned";
       const bucket =
@@ -510,7 +594,9 @@ export function computeAgentMatrix(
 
       bucket.resolvedCount += row.resolved ? 1 : 0;
       bucket.totalCount += 1;
-      bucket.escalatedCount += row.escalated ? 1 : 0;
+      if (qualifies && owner && agentName === owner) {
+        bucket.escalatedCount += 1;
+      }
 
       aggregations.set(key, bucket);
     });
@@ -662,6 +748,115 @@ function buildSparkline(daily: Map<string, number[]>): AgentPerformancePoint[] {
       date,
       meanScore: calculateMean(scores)
     }));
+}
+
+function parseSteps(value: unknown): string[] {
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => asString(entry)).filter(Boolean).slice(0, MAX_STEP_ITEMS);
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        return parsed.map((entry) => asString(entry)).filter(Boolean).slice(0, MAX_STEP_ITEMS);
+      }
+    } catch {
+      // ignore JSON parse errors and fall back to delimiter split
+    }
+    return text.split(STEP_SPLIT_REGEX).map((entry) => entry.trim()).filter(Boolean).slice(0, MAX_STEP_ITEMS);
+  }
+  return [];
+}
+
+function parseSentimentScores(value: unknown): SentimentScores | null {
+  if (!value) {
+    return null;
+  }
+  let parsed: Record<string, unknown> | null = null;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const loaded = JSON.parse(value);
+      if (loaded && typeof loaded === "object" && !Array.isArray(loaded)) {
+        parsed = loaded as Record<string, unknown>;
+      }
+    } catch {
+      parsed = null;
+    }
+  } else if (value && typeof value === "object" && !Array.isArray(value)) {
+    parsed = value as Record<string, unknown>;
+  }
+  if (!parsed) {
+    return null;
+  }
+  const bucketValues: Record<SentimentLabel, number> = {
+    Delight: 0,
+    Convenience: 0,
+    Trust: 0,
+    Frustration: 0,
+    Disappointment: 0,
+    Concern: 0,
+    Hostility: 0,
+    Neutral: 0
+  };
+  let total = 0;
+  SENTIMENT_LABELS.forEach((label) => {
+    const normalizedKey = label.toLowerCase();
+    const snakeKey = label.replace(" ", "_").toLowerCase();
+    const candidate = parsed[label] ?? parsed[normalizedKey] ?? parsed[snakeKey];
+    const numeric = typeof candidate === "number" ? candidate : Number(candidate ?? 0);
+    const safe = Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+    bucketValues[label] = safe;
+    total += safe;
+  });
+  if (total <= 0) {
+    return null;
+  }
+  const normalized: SentimentScores = {
+    Delight: 0,
+    Convenience: 0,
+    Trust: 0,
+    Frustration: 0,
+    Disappointment: 0,
+    Concern: 0,
+    Hostility: 0,
+    Neutral: 0
+  };
+  SENTIMENT_LABELS.forEach((label) => {
+    normalized[label] = bucketValues[label] / total;
+  });
+  return normalized;
+}
+
+function resolveSentimentPrimary(
+  value: string,
+  scores: SentimentScores | null
+): SentimentLabel | null {
+  if (value && isSentimentLabel(value)) {
+    return value;
+  }
+  if (!scores) {
+    return null;
+  }
+  return SENTIMENT_LABELS.reduce<SentimentLabel>((best, label) => {
+    if (scores[label] > scores[best]) {
+      return label;
+    }
+    return best;
+  }, SENTIMENT_LABELS[0]);
+}
+
+function isSentimentLabel(value: string): value is SentimentLabel {
+  if (!value) {
+    return false;
+  }
+  return SENTIMENT_LABELS.includes(value as SentimentLabel);
 }
 
 function asNumber(value: unknown): number | null {

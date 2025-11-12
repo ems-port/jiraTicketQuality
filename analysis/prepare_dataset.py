@@ -20,7 +20,8 @@ from tqdm import tqdm
 # --- config ---
 #INPUT_CSV = "local_data/JiraOct.csv"  # exact file name you provided
 #INPUT_CSV = "local_data/JiraAug.csv"  # exact file name you provided
-INPUT_CSV = "data/JiraSample.csv"  # exact file name you provided
+INPUT_CSV = "local_data/JiraNov.csv"  # exact file name you provided
+#INPUT_CSV = "data/JiraSample.csv"  # exact file name you provided
 OUTPUT_JSONL_SAMPLE = "data/jira_clean_sample.jsonl"
 SAMPLE_ISSUES = None       # set to None to process all issues
 DEFAULT_MAX_MERGED_TOKENS = 5000  # approximate context size for gpt-4o mini

@@ -5,8 +5,10 @@ import { AgentMatrixHeatmap } from "@/components/AgentMatrixHeatmap";
 import { AgentRankList } from "@/components/AgentRankList";
 import { ContactReasonPanel } from "@/components/ContactReasonPanel";
 import { CommandCenterPanel } from "@/components/CommandCenterPanel";
+import { EscalationCard } from "@/components/EscalationCard";
 import { DrilldownTable } from "@/components/DrilldownTable";
 import { KPICard } from "@/components/KPICard";
+import { ManagerReviewPanel } from "@/components/ManagerReviewPanel";
 import { TipsOfTheDayPanel } from "@/components/TipsOfTheDayPanel";
 import { SettingsDrawer } from "@/components/SettingsDrawer";
 import { TipsDrilldownModal } from "@/components/TipsDrilldownModal";
@@ -18,7 +20,7 @@ import {
   computeAgentMatrix,
   computeAverageConversationRating,
   computeContactReasonSummary,
-  computeEscalatedCount,
+  buildEscalationSeries,
   computeFlaggedAgents,
   computeImprovementTips,
   computeResolvedStats,
@@ -27,11 +29,23 @@ import {
   filterByWindow,
   normaliseRows
 } from "@/lib/metrics";
+import { isEscalated } from "@/lib/escalations";
+import { normalizeAgentRole, resolveAgentRole, formatRoleLabel } from "@/lib/roles";
 import { useDashboardStore } from "@/lib/useDashboardStore";
-import type { ConversationRow, SettingsState, TimeWindow } from "@/types";
+import type {
+  AgentRole,
+  ConversationRow,
+  EscalationMetricKind,
+  EscalationSeriesEntry,
+  MetricSeries,
+  SettingsState,
+  TimeWindow
+} from "@/types";
 
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
+const ROLE_FILTERS: AgentRole[] = ["TIER1", "TIER2", "NON_AGENT"];
 const SAMPLE_DATA_ENDPOINT = "/api/sample-data";
+const ROLE_DATA_ENDPOINT = "/api/roles";
 
 const DEFAULT_SETTINGS: SettingsState = {
   toxicity_threshold: 0.8,
@@ -52,20 +66,27 @@ export default function DashboardPage() {
   const setDeAnonymize = useDashboardStore((state) => state.setDeAnonymize);
   const idMapping = useDashboardStore((state) => state.idMapping);
   const setIdMapping = useDashboardStore((state) => state.setIdMapping);
+  const roleMapping = useDashboardStore((state) => state.roleMapping);
+  const mergeRoleMapping = useDashboardStore((state) => state.mergeRoleMapping);
+  const updateAgentRole = useDashboardStore((state) => state.updateAgentRole);
 
   const [selectedWindow, setSelectedWindow] = useState<TimeWindow>("7d");
   const [searchTerm, setSearchTerm] = useState("");
   const [agentFilter, setAgentFilter] = useState("All");
+  const [roleFilter, setRoleFilter] = useState<AgentRole | "All">("All");
   const [hubFilter, setHubFilter] = useState("All");
   const [modelFilter, setModelFilter] = useState("All");
+  const [escalationMetric, setEscalationMetric] = useState<EscalationMetricKind>("tier");
   const [settings, setSettings] = useState<SettingsState>(DEFAULT_SETTINGS);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [drilldownState, setDrilldownState] = useState<DrilldownState>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [mappingError, setMappingError] = useState<string | null>(null);
+  const [roleUploadError, setRoleUploadError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [tipsDrilldownOpen, setTipsDrilldownOpen] = useState(false);
   const initialLoadAttemptedRef = useRef(false);
+  const initialRoleLoadAttemptedRef = useRef(false);
 
   const loadSampleData = useCallback(async () => {
     initialLoadAttemptedRef.current = true;
@@ -110,6 +131,72 @@ export default function DashboardPage() {
   }, [rows.length, loadSampleData]);
 
   useEffect(() => {
+    if (initialRoleLoadAttemptedRef.current) {
+      return;
+    }
+    if (Object.keys(roleMapping).length > 0) {
+      initialRoleLoadAttemptedRef.current = true;
+      return;
+    }
+    initialRoleLoadAttemptedRef.current = true;
+    const controller = new AbortController();
+    const loadRoles = async () => {
+      try {
+        const response = await fetch(ROLE_DATA_ENDPOINT, { signal: controller.signal });
+        if (!response.ok) {
+          throw new Error(`Failed to load roles CSV (${response.status})`);
+        }
+        const csvText = await response.text();
+        const parsed = Papa.parse<Record<string, string | null | undefined>>(csvText, {
+          header: true,
+          skipEmptyLines: true
+        });
+        if (parsed.errors.length) {
+          setRoleUploadError("Unable to parse default roles CSV. Please upload manually.");
+          return;
+        }
+        const updates: Record<string, AgentRole> = {};
+        parsed.data.forEach((row) => {
+          if (!row) {
+            return;
+          }
+          const userId = (
+            row.user_id ?? row.userId ?? row.id ?? (row as Record<string, unknown>).agent_id ?? ""
+          )
+            .toString()
+            .trim();
+          const roleValue = (
+            row.port_role ?? row.portRole ?? row.role ?? (row as Record<string, unknown>).agent_role ?? ""
+          )
+            .toString()
+            .trim();
+          if (userId && roleValue) {
+            updates[userId] = normalizeAgentRole(roleValue);
+          }
+        });
+        const tieredEntries = Object.fromEntries(
+          Object.entries(updates).filter(([, role]) => role !== "NON_AGENT")
+        );
+        if (!Object.keys(tieredEntries).length) {
+          setRoleUploadError("Default roles CSV has no Tier 1 or Tier 2 agents. Upload an updated file.");
+          return;
+        }
+        mergeRoleMapping(tieredEntries);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        setRoleUploadError((error as Error).message ?? "Unable to load default roles CSV.");
+      }
+    };
+
+    void loadRoles();
+    return () => {
+      controller.abort();
+    };
+  }, [mergeRoleMapping, roleMapping]);
+
+  useEffect(() => {
     if (!deAnonymize) {
       setMappingError(null);
     }
@@ -123,11 +210,14 @@ export default function DashboardPage() {
       const matchesSearch = !search || row.issueKey.toLowerCase().includes(search);
       const matchesAgent =
         agentFilter === "All" || row.agentList.some((agent) => agent === agentFilter);
+      const matchesRole =
+        roleFilter === "All" ||
+        row.agentList.some((agent) => resolveAgentRole(agent, roleMapping) === roleFilter);
       const matchesHub = hubFilter === "All" || (row.hub ?? "Unassigned") === hubFilter;
       const matchesModel = modelFilter === "All" || (row.model ?? "Unknown") === modelFilter;
-      return matchesSearch && matchesAgent && matchesHub && matchesModel;
+      return matchesSearch && matchesAgent && matchesRole && matchesHub && matchesModel;
     });
-  }, [sourceRows, searchTerm, agentFilter, hubFilter, modelFilter]);
+  }, [sourceRows, searchTerm, agentFilter, roleFilter, hubFilter, modelFilter, roleMapping]);
 
   const referenceNow = useMemo(() => {
     let latest: Date | null = null;
@@ -150,9 +240,13 @@ export default function DashboardPage() {
     [filteredRows]
   );
 
-  const escalatedRows = useMemo(
-    () => filteredRows.filter((row) => row.escalated),
-    [filteredRows]
+  const tierEscalatedRows = useMemo(
+    () => filteredRows.filter((row) => isEscalated(row, roleMapping, "tier")),
+    [filteredRows, roleMapping]
+  );
+  const handoffRows = useMemo(
+    () => filteredRows.filter((row) => isEscalated(row, roleMapping, "handoff")),
+    [filteredRows, roleMapping]
   );
 
   const ratingSeries = useMemo(
@@ -163,10 +257,44 @@ export default function DashboardPage() {
     () => buildResolvedSeries(attributeFilteredRows, referenceNow),
     [attributeFilteredRows, referenceNow]
   );
-  const escalatedSeries = useMemo(
-    () => buildMetricSeries(attributeFilteredRows, computeEscalatedCount, referenceNow),
-    [attributeFilteredRows, referenceNow]
+  const escalationSeries = useMemo(
+    () => buildEscalationSeries(attributeFilteredRows, roleMapping, referenceNow),
+    [attributeFilteredRows, roleMapping, referenceNow]
   );
+
+  const tierPercentSeries = useMemo(
+    () =>
+      escalationSeries.map((entry) => ({
+        window: entry.window,
+        value: computePercentage(entry.tierCount, entry.total),
+        count: entry.tierCount,
+        total: entry.total
+      })),
+    [escalationSeries]
+  );
+
+  const handoffPercentSeries = useMemo(
+    () =>
+      escalationSeries.map((entry) => ({
+        window: entry.window,
+        value: computePercentage(entry.handoffCount, entry.total),
+        count: entry.handoffCount,
+        total: entry.total
+      })),
+    [escalationSeries]
+  );
+
+  const selectedEscalationStats = escalationSeries.find(
+    (entry) => entry.window === selectedWindow
+  );
+  const tierFooterText =
+    selectedEscalationStats && selectedEscalationStats.total
+      ? `${selectedEscalationStats.tierCount.toLocaleString()} of ${selectedEscalationStats.total.toLocaleString()} escalated`
+      : "No tickets in this window";
+  const handoffFooterText =
+    selectedEscalationStats && selectedEscalationStats.total
+      ? `${selectedEscalationStats.handoffCount.toLocaleString()} of ${selectedEscalationStats.total.toLocaleString()} handed over`
+      : "No tickets in this window";
 
   const selectedRating =
     ratingSeries.find((entry) => entry.window === selectedWindow)?.value ?? null;
@@ -177,9 +305,6 @@ export default function DashboardPage() {
   );
 
   const selectedResolvedPercentage = selectedResolvedStats.percentage;
-
-  const selectedEscalated =
-    escalatedSeries.find((entry) => entry.window === selectedWindow)?.value ?? null;
 
   const topAgents = useMemo(
     () => computeTopAgents(attributeFilteredRows, referenceNow),
@@ -194,8 +319,12 @@ export default function DashboardPage() {
     [attributeFilteredRows, settings, referenceNow]
   );
   const agentMatrix = useMemo(
-    () => computeAgentMatrix(attributeFilteredRows, selectedWindow, referenceNow),
-    [attributeFilteredRows, selectedWindow, referenceNow]
+    () =>
+      computeAgentMatrix(attributeFilteredRows, selectedWindow, referenceNow, {
+        roleMapping,
+        escalationMetric
+      }),
+    [attributeFilteredRows, selectedWindow, referenceNow, roleMapping, escalationMetric]
   );
 
   const improvementTipSummary = useMemo(
@@ -286,6 +415,47 @@ export default function DashboardPage() {
       },
       error: () => {
         setMappingError("Unable to read the lookup CSV.");
+      }
+    });
+  };
+
+  const handleRolesUpload = (file: File) => {
+    setRoleUploadError(null);
+    Papa.parse<Record<string, string | null | undefined>>(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        if (results.errors.length) {
+          setRoleUploadError("Unable to parse roles CSV. Check the header names.");
+          return;
+        }
+        const updates: Record<string, AgentRole> = {};
+        results.data.forEach((row) => {
+          if (!row) {
+            return;
+          }
+          const userId = (
+            row.user_id ?? row.userId ?? row.id ?? (row as Record<string, unknown>).agent_id ?? ""
+          )
+            .toString()
+            .trim();
+          const roleValue = (
+            row.port_role ?? row.portRole ?? row.role ?? (row as Record<string, unknown>).agent_role ?? ""
+          )
+            .toString()
+            .trim();
+          if (userId && roleValue) {
+            updates[userId] = normalizeAgentRole(roleValue);
+          }
+        });
+        if (!Object.keys(updates).length) {
+          setRoleUploadError("No user_id / role pairs detected in the CSV.");
+          return;
+        }
+        mergeRoleMapping(updates);
+      },
+      error: () => {
+        setRoleUploadError("Unable to read the selected roles CSV.");
       }
     });
   };
@@ -388,6 +558,13 @@ export default function DashboardPage() {
                   getLabel={(value) => resolveDisplayName(value, idMapping, deAnonymize).label}
                 />
                 <FilterSelect
+                  label="Role"
+                  value={roleFilter}
+                  onChange={(value) => setRoleFilter(value as AgentRole | "All")}
+                  options={ROLE_FILTERS}
+                  getLabel={(value) => formatRoleLabel(value as AgentRole)}
+                />
+                <FilterSelect
                   label="Hub"
                   value={hubFilter}
                   onChange={setHubFilter}
@@ -422,19 +599,19 @@ export default function DashboardPage() {
                 selectedWindow={selectedWindow}
                 onClick={() => openDrilldown("Resolved conversations", resolvedRows)}
               />
-              <KPICard
-                title="Escalated issues"
-                value={selectedEscalated}
-                formatValue={(value) =>
-                  value === null
-                    ? "—"
-                    : Number(value).toLocaleString(undefined, {
-                        maximumFractionDigits: 0
-                      })
-                }
-                series={escalatedSeries}
+              <EscalationCard
+                mode={escalationMetric}
+                onModeChange={setEscalationMetric}
+                tierSeries={tierPercentSeries}
+                handoffSeries={handoffPercentSeries}
                 selectedWindow={selectedWindow}
-                onClick={() => openDrilldown("Escalated conversations", escalatedRows)}
+                footerText={escalationMetric === "tier" ? tierFooterText : handoffFooterText}
+                onOpen={() =>
+                  openDrilldown(
+                    escalationMetric === "tier" ? "Escalation T1→T2" : "Handovers T1→Any",
+                    escalationMetric === "tier" ? tierEscalatedRows : handoffRows
+                  )
+                }
               />
             </section>
 
@@ -450,6 +627,7 @@ export default function DashboardPage() {
                   agents={topAgents.slice(0, 5)}
                   mapping={idMapping}
                   deAnonymize={deAnonymize}
+                  roleMapping={roleMapping}
                 />
               </div>
               <div className="lg:col-span-1">
@@ -472,6 +650,8 @@ export default function DashboardPage() {
                   mapping={idMapping}
                   deAnonymize={deAnonymize}
                   entityLabel="Agent ID"
+                  showAgentRoles={true}
+                  roleMapping={roleMapping}
                 />
               </div>
             </section>
@@ -481,6 +661,8 @@ export default function DashboardPage() {
               window={selectedWindow}
               mapping={idMapping}
               deAnonymize={deAnonymize}
+              roleMapping={roleMapping}
+              escalationMetric={escalationMetric}
             />
 
             <ContactReasonPanel
@@ -488,6 +670,8 @@ export default function DashboardPage() {
               window={selectedWindow}
               onSelect={handleContactReasonSelect}
             />
+
+            <ManagerReviewPanel rows={filteredRows} mapping={idMapping} deAnonymize={deAnonymize} />
           </div>
 
           <CommandCenterPanel
@@ -499,10 +683,16 @@ export default function DashboardPage() {
             deAnonymize={deAnonymize}
             onToggleDeAnonymize={setDeAnonymize}
             onUploadMapping={handleMappingUpload}
-            mappedCount={Object.keys(idMapping).length}
-            conversationCount={sourceRows.length}
-            mappingError={mappingError}
-          />
+          mappedCount={Object.keys(idMapping).length}
+          conversationCount={sourceRows.length}
+          mappingError={mappingError}
+          roleMapping={roleMapping}
+          onUploadRoles={handleRolesUpload}
+          roleUploadError={roleUploadError}
+          onRoleChange={updateAgentRole}
+          agentIds={agentOptions}
+          idMapping={idMapping}
+        />
         </div>
       </div>
 
@@ -513,6 +703,7 @@ export default function DashboardPage() {
         onClose={() => setDrilldownState(null)}
         mapping={idMapping}
         deAnonymize={deAnonymize}
+        roleMapping={roleMapping}
       />
 
       <TipsDrilldownModal
@@ -523,6 +714,7 @@ export default function DashboardPage() {
         onClose={() => setTipsDrilldownOpen(false)}
         mapping={idMapping}
         deAnonymize={deAnonymize}
+        roleMapping={roleMapping}
       />
 
       <SettingsDrawer
@@ -533,6 +725,13 @@ export default function DashboardPage() {
       />
     </main>
   );
+}
+
+function computePercentage(count: number | null, total: number | null): number | null {
+  if (count === null || total === null || total <= 0) {
+    return null;
+  }
+  return (count / total) * 100;
 }
 
 type FilterSelectProps = {

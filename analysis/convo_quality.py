@@ -87,6 +87,21 @@ DEFAULT_TAXONOMY_HINTS = _safe_int(os.getenv("PORT_TAXONOMY_HINTS"), 3)
 
 CODE_BLOCK_PATTERN = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 
+MAX_SUMMARY_CHARS = 250
+MAX_IMPROVEMENT_TIP_CHARS = 200
+MAX_REASON_CHARS = 600
+MAX_STEPS = 8
+SENTIMENT_BUCKETS: Tuple[str, ...] = (
+    "Delight",
+    "Convenience",
+    "Trust",
+    "Frustration",
+    "Disappointment",
+    "Concern",
+    "Hostility",
+    "Neutral",
+)
+
 
 def format_taxonomy_block(taxonomy: Sequence[str], hints_per_label: int) -> str:
     if not taxonomy:
@@ -131,6 +146,207 @@ def _extract_json_payload(content: str) -> Dict[str, Any]:
                 except json.JSONDecodeError:
                     continue
     raise ValueError("No valid JSON object found in LLM response")
+
+
+def _stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _truncate(value: str, limit: int) -> str:
+    text = value.strip()
+    if not text or len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "t", "yes", "y", "1", "resolved", "done"}:
+            return True
+        if normalized in {"false", "f", "no", "n", "0", "unresolved", "open"}:
+            return False
+    return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(float(value.strip()))
+        except ValueError:
+            return None
+    return None
+
+
+def _normalise_steps_field(value: Any) -> List[str]:
+    items: List[str] = []
+    raw: Any = value
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            raw = []
+        else:
+            try:
+                loaded = json.loads(text)
+                raw = loaded
+            except json.JSONDecodeError:
+                raw = [segment.strip() for segment in text.split("||")]
+    if isinstance(raw, list):
+        for entry in raw:
+            text = _truncate(_stringify(entry), MAX_REASON_CHARS)
+            if text:
+                items.append(text)
+    elif isinstance(raw, str):
+        text = _truncate(raw, MAX_REASON_CHARS)
+        if text:
+            items.append(text)
+    return items[:MAX_STEPS]
+
+
+def _normalise_sentiment_scores(value: Any) -> Dict[str, float]:
+    parsed: Dict[str, Any] = {}
+    if isinstance(value, dict):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            loaded = json.loads(value)
+            if isinstance(loaded, dict):
+                parsed = loaded
+        except json.JSONDecodeError:
+            parsed = {}
+    scores: Dict[str, float] = {}
+    total = 0.0
+    for label in SENTIMENT_BUCKETS:
+        raw = parsed.get(label)
+        if raw is None and isinstance(parsed, dict):
+            raw = parsed.get(label.lower()) or parsed.get(label.replace(" ", "_").lower())
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            val = 0.0
+        safe = max(0.0, min(1.0, val))
+        scores[label] = safe
+        total += safe
+    if total <= 0:
+        scores = {label: (1.0 if label == "Neutral" else 0.0) for label in SENTIMENT_BUCKETS}
+        total = 1.0
+    normalized: Dict[str, float] = {}
+    running_total = 0.0
+    previous_label = SENTIMENT_BUCKETS[-1]
+    for label in SENTIMENT_BUCKETS:
+        fraction = scores[label] / total
+        rounded = round(fraction, 4)
+        normalized[label] = rounded
+        running_total += rounded
+        previous_label = label
+    delta = round(1.0 - running_total, 4)
+    normalized[previous_label] = round(normalized[previous_label] + delta, 4)
+    return normalized
+
+
+def _normalise_llm_payload(
+    payload: Optional[Dict[str, Any]],
+    *,
+    contact_reason_original: str,
+) -> Dict[str, Any]:
+    data: Dict[str, Any] = dict(payload or {})
+    summary = _truncate(_stringify(data.get("llm_summary_250")), MAX_SUMMARY_CHARS)
+    data["llm_summary_250"] = summary
+
+    problem_extract = data.get("problem_extract")
+    if not problem_extract:
+        problem_extract = data.get("extract_customer_probelm")
+    problem_text = _truncate(_stringify(problem_extract), MAX_SUMMARY_CHARS)
+    data["problem_extract"] = problem_text
+    data["extract_customer_probelm"] = problem_text
+
+    resolution_extract = _truncate(_stringify(data.get("resolution_extract")), MAX_SUMMARY_CHARS)
+    data["resolution_extract"] = resolution_extract
+
+    improvement_tip = _truncate(_stringify(data.get("improvement_tip")), MAX_IMPROVEMENT_TIP_CHARS)
+    data["improvement_tip"] = improvement_tip
+
+    reason_override = _truncate(_stringify(data.get("reason_override_why")), MAX_REASON_CHARS)
+    resolution_why = _truncate(_stringify(data.get("resolution_why")), MAX_REASON_CHARS)
+    data["reason_override_why"] = reason_override
+    data["resolution_why"] = resolution_why
+
+    contact_reason = _stringify(data.get("contact_reason"))
+    original_reason = contact_reason_original.strip()
+    contact_reason_change = _coerce_bool(data.get("contact_reason_change"))
+    if contact_reason_change is None:
+        if contact_reason and original_reason:
+            contact_reason_change = contact_reason.lower() != original_reason.lower()
+        else:
+            contact_reason_change = bool(contact_reason and not original_reason)
+    data["contact_reason_change"] = bool(contact_reason_change)
+
+    data["contact_reason_change_justification"] = reason_override
+    data["llm_conatct_reason_change"] = reason_override
+
+    is_resolved_flag = _coerce_bool(data.get("is_resolved"))
+    resolved_flag = is_resolved_flag
+    if resolved_flag is None:
+        resolved_flag = _coerce_bool(data.get("resolved"))
+    if resolved_flag is None:
+        resolved_flag = False
+    data["is_resolved"] = resolved_flag
+    data["resolved"] = resolved_flag
+
+    steps_extract = _normalise_steps_field(data.get("steps_extract"))
+    data["steps_extract"] = steps_extract
+
+    timestamp_value = data.get("resolution_timestamp_iso") or data.get("resolution_timestamp")
+    timestamp_iso = ""
+    if timestamp_value:
+        parsed_ts = parse_datetime(timestamp_value)
+        if parsed_ts:
+            timestamp_iso = parsed_ts.isoformat()
+    data["resolution_timestamp_iso"] = timestamp_iso
+
+    index_value = _coerce_int(data.get("resolution_message_index"))
+    data["resolution_message_index"] = index_value if index_value and index_value > 0 else None
+
+    sentiment_scores = _normalise_sentiment_scores(data.get("customer_sentiment_scores"))
+    data["customer_sentiment_scores"] = sentiment_scores
+
+    sentiment_primary = _stringify(data.get("customer_sentiment_primary"))
+    if sentiment_primary not in SENTIMENT_BUCKETS:
+        sentiment_primary = max(sentiment_scores.items(), key=lambda entry: entry[1])[0]
+    data["customer_sentiment_primary"] = sentiment_primary
+
+    agent_score = data.get("agent_score")
+    if isinstance(agent_score, (int, float)) or (
+        isinstance(agent_score, str) and agent_score.strip().isdigit()
+    ):
+        data["agent_score"] = agent_score
+    customer_score = data.get("customer_score")
+    if isinstance(customer_score, (int, float)) or (
+        isinstance(customer_score, str) and customer_score.strip().isdigit()
+    ):
+        data["customer_score"] = customer_score
+
+    conversation_rating = data.get("conversation_rating")
+    if isinstance(conversation_rating, (int, float)) or (
+        isinstance(conversation_rating, str) and conversation_rating.strip().isdigit()
+    ):
+        data["conversation_rating"] = conversation_rating
+
+    return data
 
 
 PROFANITY_TERMS: Tuple[str, ...] = (
@@ -189,11 +405,24 @@ CSV_FIELDS: Sequence[str] = (
     "llm_summary_250",
     "conversation_rating",
     "extract_customer_problem",
+    "problem_extract",
+    "resolution_extract",
+    "steps_extract",
+    "resolution_timestamp_iso",
+    "resolution_message_index",
     "contact_reason",
     "contact_reason_original",
+    "contact_reason_change",
+    "reason_override_why",
+    "contact_reason_change_justification",
+    "llm_conatct_reason_change",
+    "resolution_why",
+    "customer_sentiment_primary",
+    "customer_sentiment_scores",
     "agent_score",
     "customer_score",
     "resolved",
+    "is_resolved",
     "improvement_tip",
     "llm_model",
     "llm_input_tokens",
@@ -669,24 +898,59 @@ def build_llm_prompts(
 
     user_prompt = textwrap.dedent(
         """
-        Review the conversation above and output a JSON object with these keys:
-        - llm_summary_250: concise summary (<=250 characters).
-        - conversation_rating: integer 1-5 (overall quality).
-        - extract_customer_probelm: short explanation of the customer's main problem.
-        - contact_reason: choose the closest entry from the provided contact taxonomy. If unsure, return "Other".
-        - agent_score: integer 1-5 reflecting agent performance.
-        - customer_score: integer 1-5 reflecting customer behavior and clarity.
-        - resolved: boolean true/false indicating whether the issue seems resolved.
-        - improvement_tip: actionable advice for the agent (<=200 characters).
+        Review the conversation above and respond with a SINGLE JSON object that satisfies the schema below.
 
-        Scoring guidance (apply separately to conversation_rating, agent_score, customer_score):
-        1 = Very poor (major issues, inaccurate or harmful behaviour).
-        2 = Poor (significant problems or missing key actions).
-        3 = Adequate (meets minimum expectations with notable gaps).
-        4 = Good (solid performance with only minor improvements needed).
-        5 = Excellent (exemplary work, no meaningful improvements needed).
+        Task sequence (complete all steps):
+        1. Compare the customer's stated problem to the agent's classification. Set contact_reason_change=true when your chosen contact_reason differs from the original, and explain the override using literal phrases or timestamps from the transcript.
+        2. Decide whether the conversation is resolved. Set both resolved and is_resolved accordingly, and write resolution_why that cites the agent or customer action that proves the outcome (or why it failed).
+        3. Provide one-sentence summaries:
+           a. problem_extract – customer's core problem (<=250 chars).
+           b. resolution_extract – how it was solved or why it remains open (<=250 chars).
+        4. List chronological agent actions that moved the ticket forward in steps_extract (array of short strings, earliest first, max 8 entries).
+        5. Identify the message where the issue was resolved (customer confirmation or decisive agent fix). Populate resolution_timestamp_iso (ISO 8601) and resolution_message_index (1-based transcript index). Use null for both when unresolved.
+        6. Produce customer sentiment:
+           - customer_sentiment_primary must be one of: Delight, Convenience, Trust, Frustration, Disappointment, Concern, Hostility, Neutral.
+           - customer_sentiment_scores is an object with those eight keys. Values are floats between 0 and 1 that sum to ~1.00 (±0.02 tolerance).
+        7. Generate llm_summary_250 (<=250 chars), conversation_rating/agent_score/customer_score (integers 1-5), improvement_tip (<=200 chars, actionable).
 
-        Return ONLY strict JSON, no explanations.
+        Strict JSON schema (all fields required, nulls allowed only when noted):
+        {
+          "llm_summary_250": string (<=250 chars),
+          "conversation_rating": integer (1-5),
+          "extract_customer_probelm": string (mirror of problem_extract),
+          "problem_extract": string (<=250 chars),
+          "resolution_extract": string (<=250 chars),
+          "contact_reason": string from taxonomy (or "Other"),
+          "contact_reason_change": boolean,
+          "reason_override_why": string (<=600 chars, cite transcript cues when contact_reason_change=true; use empty string when no change),
+          "agent_score": integer (1-5),
+          "customer_score": integer (1-5),
+          "resolved": boolean,
+          "is_resolved": boolean,
+          "resolution_why": string (<=600 chars, factual rationale for resolved/unresolved),
+          "steps_extract": array of strings,
+          "resolution_timestamp_iso": string | null (ISO 8601 for the resolution moment, null if unresolved),
+          "resolution_message_index": integer | null (1-based index of the decisive message, null if unresolved),
+          "customer_sentiment_primary": one of the eight labels listed above,
+          "customer_sentiment_scores": {
+            "Delight": number,
+            "Convenience": number,
+            "Trust": number,
+            "Frustration": number,
+            "Disappointment": number,
+            "Concern": number,
+            "Hostility": number,
+            "Neutral": number
+          },
+          "improvement_tip": string (<=200 chars)
+        }
+
+        Additional instructions:
+        - Quote short phrases (e.g., "customer: bike stuck at finish screen") inside reason_override_why and resolution_why to justify decisions.
+        - steps_extract should only describe agent actions or system fixes that move toward resolution; omit chit-chat.
+        - When unresolved, explain the blocker inside resolution_why and set both resolution_timestamp_iso and resolution_message_index to null.
+        - Keep tone factual and manager-ready. Return STRICT JSON only—no Markdown or extra commentary.
+        - Scoring scale for conversation_rating, agent_score, and customer_score: 1=Very poor, 2=Poor, 3=Adequate, 4=Good, 5=Excellent.
         """
     ).strip()
 
@@ -793,23 +1057,67 @@ def build_request_payload(
                 "schema": {
                     "type": "object",
                     "properties": {
-                        "llm_summary_250": {"type": "string"},
-                        "conversation_rating": {"type": "integer"},
-                        "extract_customer_probelm": {"type": "string"},
+                        "llm_summary_250": {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
+                        "conversation_rating": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "extract_customer_probelm": {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
+                        "problem_extract": {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
+                        "resolution_extract": {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
                         "contact_reason": {"type": "string"},
-                        "agent_score": {"type": "integer"},
-                        "customer_score": {"type": "integer"},
+                        "contact_reason_change": {"type": "boolean"},
+                        "reason_override_why": {"type": "string", "maxLength": MAX_REASON_CHARS},
+                        "agent_score": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "customer_score": {"type": "integer", "minimum": 1, "maximum": 5},
                         "resolved": {"type": "boolean"},
-                        "improvement_tip": {"type": "string"},
+                        "is_resolved": {"type": "boolean"},
+                        "resolution_why": {"type": "string", "maxLength": MAX_REASON_CHARS},
+                        "steps_extract": {
+                            "type": "array",
+                            "items": {"type": "string", "maxLength": MAX_REASON_CHARS},
+                            "maxItems": MAX_STEPS,
+                        },
+                        "resolution_timestamp_iso": {
+                            "anyOf": [
+                                {"type": "string", "format": "date-time"},
+                                {"type": "null"},
+                            ]
+                        },
+                        "resolution_message_index": {
+                            "anyOf": [
+                                {"type": "integer", "minimum": 1},
+                                {"type": "null"},
+                            ]
+                        },
+                        "customer_sentiment_primary": {"type": "string", "enum": list(SENTIMENT_BUCKETS)},
+                        "customer_sentiment_scores": {
+                            "type": "object",
+                            "properties": {
+                                label: {"type": "number", "minimum": 0, "maximum": 1}
+                                for label in SENTIMENT_BUCKETS
+                            },
+                            "required": list(SENTIMENT_BUCKETS),
+                            "additionalProperties": False,
+                        },
+                        "improvement_tip": {"type": "string", "maxLength": MAX_IMPROVEMENT_TIP_CHARS},
                     },
                     "required": [
                         "llm_summary_250",
                         "conversation_rating",
                         "extract_customer_probelm",
+                        "problem_extract",
+                        "resolution_extract",
                         "contact_reason",
+                        "contact_reason_change",
+                        "reason_override_why",
                         "agent_score",
                         "customer_score",
                         "resolved",
+                        "is_resolved",
+                        "resolution_why",
+                        "steps_extract",
+                        "resolution_timestamp_iso",
+                        "resolution_message_index",
+                        "customer_sentiment_primary",
+                        "customer_sentiment_scores",
                         "improvement_tip",
                     ],
                     "additionalProperties": False,
@@ -1062,11 +1370,24 @@ def process_conversation(
         "llm_summary_250": "",
         "conversation_rating": "",
         "extract_customer_problem": "",
+        "problem_extract": "",
+        "resolution_extract": "",
+        "steps_extract": "[]",
+        "resolution_timestamp_iso": "",
+        "resolution_message_index": "",
         "contact_reason": "",
         "contact_reason_original": contact_reason_original,
+        "contact_reason_change": "",
+        "reason_override_why": "",
+        "contact_reason_change_justification": "",
+        "llm_conatct_reason_change": "",
+        "resolution_why": "",
+        "customer_sentiment_primary": "",
+        "customer_sentiment_scores": "",
         "agent_score": "",
         "customer_score": "",
         "resolved": "",
+        "is_resolved": "",
         "improvement_tip": "",
         "llm_model": model,
         "llm_input_tokens": str(input_tokens) if input_tokens is not None else "",
@@ -1079,20 +1400,50 @@ def process_conversation(
     if metrics.customer_abuse_count == 0:
         row["customer_abuse_detected"] = "false"
 
-    if llm_payload:
-        row["llm_summary_250"] = str(llm_payload.get("llm_summary_250", "")).strip()
-        rating = llm_payload.get("conversation_rating")
-        row["conversation_rating"] = str(rating).strip() if rating is not None else ""
-        row["extract_customer_problem"] = str(llm_payload.get("extract_customer_probelm", "")).strip()
-        row["contact_reason"] = str(llm_payload.get("contact_reason", "")).strip()
-        row["agent_score"] = str(llm_payload.get("agent_score", "")).strip()
-        row["customer_score"] = str(llm_payload.get("customer_score", "")).strip()
-        resolved_val = llm_payload.get("resolved")
-        if isinstance(resolved_val, bool):
-            row["resolved"] = "true" if resolved_val else "false"
-        else:
-            row["resolved"] = str(resolved_val).strip()
-        row["improvement_tip"] = str(llm_payload.get("improvement_tip", "")).strip()
+    normalized_llm = _normalise_llm_payload(llm_payload, contact_reason_original=contact_reason_original)
+
+    row["llm_summary_250"] = normalized_llm.get("llm_summary_250", "")
+    rating = normalized_llm.get("conversation_rating")
+    row["conversation_rating"] = str(rating).strip() if rating is not None else ""
+
+    problem_extract = normalized_llm.get("problem_extract", "")
+    row["extract_customer_problem"] = problem_extract
+    row["problem_extract"] = problem_extract
+    row["resolution_extract"] = normalized_llm.get("resolution_extract", "")
+
+    row["contact_reason"] = str(normalized_llm.get("contact_reason", "")).strip()
+    row["contact_reason_change"] = "true" if normalized_llm.get("contact_reason_change") else "false"
+    reason_override = normalized_llm.get("reason_override_why", "")
+    row["reason_override_why"] = reason_override
+    row["contact_reason_change_justification"] = normalized_llm.get("contact_reason_change_justification", reason_override)
+    row["llm_conatct_reason_change"] = normalized_llm.get("llm_conatct_reason_change", reason_override)
+
+    row["resolution_why"] = normalized_llm.get("resolution_why", "")
+
+    steps_value = normalized_llm.get("steps_extract", [])
+    if not isinstance(steps_value, list):
+        steps_value = _normalise_steps_field(steps_value)
+    row["steps_extract"] = json.dumps(steps_value)
+
+    resolution_timestamp_iso = normalized_llm.get("resolution_timestamp_iso") or ""
+    row["resolution_timestamp_iso"] = resolution_timestamp_iso
+
+    resolution_index = normalized_llm.get("resolution_message_index")
+    row["resolution_message_index"] = str(resolution_index) if resolution_index is not None else ""
+
+    row["agent_score"] = str(normalized_llm.get("agent_score", "")).strip()
+    row["customer_score"] = str(normalized_llm.get("customer_score", "")).strip()
+
+    resolved_flag = normalized_llm.get("resolved")
+    row["resolved"] = "true" if resolved_flag else "false"
+    row["is_resolved"] = row["resolved"]
+
+    row["improvement_tip"] = normalized_llm.get("improvement_tip", "")
+
+    sentiment_primary = normalized_llm.get("customer_sentiment_primary", "")
+    row["customer_sentiment_primary"] = sentiment_primary
+    sentiment_scores = normalized_llm.get("customer_sentiment_scores", {})
+    row["customer_sentiment_scores"] = json.dumps(sentiment_scores)
     return row
 
 

@@ -2,7 +2,8 @@ import { useMemo } from "react";
 
 import { DisplayName } from "@/components/DisplayName";
 import { formatDateTimeLocal } from "@/lib/date";
-import { ImprovementTipEntry } from "@/types";
+import { resolveAgentRole } from "@/lib/roles";
+import { AgentRole, ImprovementTipEntry } from "@/types";
 
 type TipsDrilldownModalProps = {
   open: boolean;
@@ -12,6 +13,7 @@ type TipsDrilldownModalProps = {
   onClose: () => void;
   mapping: Record<string, string>;
   deAnonymize: boolean;
+  roleMapping: Record<string, AgentRole>;
 };
 
 export function TipsDrilldownModal({
@@ -21,7 +23,8 @@ export function TipsDrilldownModal({
   windowEnd,
   onClose,
   mapping,
-  deAnonymize
+  deAnonymize,
+  roleMapping
 }: TipsDrilldownModalProps) {
   const sortedTips = useMemo(
     () => [...tips].sort((a, b) => b.count - a.count),
@@ -78,6 +81,8 @@ export function TipsDrilldownModal({
                               mapping={mapping}
                               deAnonymize={deAnonymize}
                               titlePrefix="Agent ID"
+                              showRole={true}
+                              role={resolveAgentRole(agent, roleMapping)}
                             />
                           </span>
                         ))

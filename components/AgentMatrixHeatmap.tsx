@@ -1,18 +1,23 @@
 import { DisplayName } from "@/components/DisplayName";
-import { AgentMatrixRow, TimeWindow } from "@/types";
+import { resolveAgentRole } from "@/lib/roles";
+import { AgentMatrixRow, AgentRole, EscalationMetricKind, TimeWindow } from "@/types";
 
 type AgentMatrixHeatmapProps = {
   rows: AgentMatrixRow[];
   window: TimeWindow;
   mapping: Record<string, string>;
   deAnonymize: boolean;
+  roleMapping: Record<string, AgentRole>;
+  escalationMetric: EscalationMetricKind;
 };
 
 export function AgentMatrixHeatmap({
   rows,
   window,
   mapping,
-  deAnonymize
+  deAnonymize,
+  roleMapping,
+  escalationMetric
 }: AgentMatrixHeatmapProps) {
   const maxFirst = maxValue(rows.map((row) => row.avgFirstResponseMinutes));
   const maxAvg = maxValue(rows.map((row) => row.avgAgentResponseMinutes));
@@ -35,7 +40,9 @@ export function AgentMatrixHeatmap({
               <th className="px-4 py-3 text-left font-semibold">Avg First Response (min)</th>
               <th className="px-4 py-3 text-left font-semibold">Avg Agent Response (min)</th>
               <th className="px-4 py-3 text-left font-semibold">Resolved Rate</th>
-              <th className="px-4 py-3 text-left font-semibold">Escalated Tickets</th>
+              <th className="px-4 py-3 text-left font-semibold">
+                {escalationMetric === "tier" ? "Escalation T1→T2" : "Handovers T1→Any"}
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/70">
@@ -47,6 +54,8 @@ export function AgentMatrixHeatmap({
                     mapping={mapping}
                     deAnonymize={deAnonymize}
                     titlePrefix="Agent ID"
+                    showRole={true}
+                    role={resolveAgentRole(row.agent, roleMapping)}
                   />
                 </td>
                 <td className="px-4 py-3" style={{ background: heatmap(row.avgFirstResponseMinutes, maxFirst, true) }}>
