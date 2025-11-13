@@ -62,9 +62,7 @@ export const useDashboardStore = create<DashboardState>()(
     {
       name: "conversation-quality-dashboard",
       partialize: (state) => ({
-        deAnonymize: state.deAnonymize,
-        idMapping: state.idMapping,
-        roleMapping: state.roleMapping
+        deAnonymize: state.deAnonymize
       })
     }
   )

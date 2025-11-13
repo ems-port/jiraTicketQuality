@@ -13,7 +13,7 @@ import pandas as pd
 import json
 import re
 from pathlib import Path
-from typing import List, Sequence
+from typing import Dict, List, Sequence
 from dateutil import parser as dtp
 from tqdm import tqdm
 
@@ -33,6 +33,8 @@ KEEP_MAP = {
     "Reporter": "reporter",
     "Status": "status",
     "Resolution": "resolution",
+    "Custom field (Rental ID)": "Rental ID",
+    "Custom field (Bike QR Code)": "Bike QR Code",
     "Created": "created",
     "Updated": "updated",
     "Due date": "due_date",
@@ -47,6 +49,7 @@ CUSTOM_FIELDS_BASE = {
     "Satisfaction rating": "satisfaction_rating",
 }
 CONTACT_REASON_HEADER = "Custom field (Contact Reason)"
+COMMENT_BASE_HEADERS = {"Comments", "Comment"}
 
 IMG_PATTERN = re.compile(r"!([^!\|\n]+)(?:\|[^!]*)?!")  # Jira image markup
 IMAGE_FILE_PATTERN = re.compile(r"\b[\w\-.]+\.(?:png|jpe?g|gif|bmp|tiff|svg)\b", re.IGNORECASE)
@@ -184,8 +187,10 @@ def main(
 
     df = pd.concat(data_frames, ignore_index=True, sort=False)
 
-    # Comment columns: "Comments", "Comments.1", ...
-    comment_cols = [c for c in df.columns if c == "Comments" or c.startswith("Comments.")]
+    # Comment columns: handle old "Comments" and new "Comment" headings plus pandas suffixes
+    comment_cols = [
+        col for col in df.columns if col.split(".", 1)[0] in COMMENT_BASE_HEADERS
+    ]
 
     # Contact reason possible duplicates: base and .N variants
     contact_reason_cols = [c for c in df.columns if c == CONTACT_REASON_HEADER or c.startswith(CONTACT_REASON_HEADER + ".")]

@@ -40,13 +40,13 @@ export function EscalationCard({
             type="button"
             onClick={() => onModeChange(metric)}
             className={clsx(
-              "rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition",
+              "rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition flex-1 min-w-[120px] text-center",
               metric === mode
                 ? "bg-brand-500 text-white"
                 : "border border-slate-700 text-slate-300 hover:border-brand-500 hover:text-brand-100"
             )}
           >
-            {METRIC_LABELS[metric]}
+            {metric === "tier" ? "T1→T2" : "T1→Any"}
           </button>
         ))}
       </div>

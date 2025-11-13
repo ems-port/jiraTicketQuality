@@ -192,10 +192,16 @@ describe("computeTopAgents", () => {
   ];
 
   it("ranks agents by mean score over the last 7 days", () => {
-    const performances = computeTopAgents(rows, NOW, 5);
+    const performances = computeTopAgents(rows, roleMapping, NOW, { limit: 5 });
     expect(performances[0]?.agent).toBe("Agent A");
     expect(performances[0]?.meanScore).toBeCloseTo(4.6);
     expect(performances[0]?.sparkline.length).toBeGreaterThan(0);
+  });
+
+  it("filters agents by role when specified", () => {
+    const performances = computeTopAgents(rows, roleMapping, NOW, { limit: 5, roleFilter: "TIER2" });
+    expect(performances).toHaveLength(1);
+    expect(performances[0]?.agent).toBe("Agent B");
   });
 });
 
@@ -278,6 +284,15 @@ describe("computeAgentMatrix", () => {
     expect(agentRow?.avgFirstResponseMinutes).toBeCloseTo(7.5);
     expect(agentRow?.resolvedRate).toBeCloseTo(0.5);
     expect(agentRow?.escalatedCount).toBe(1);
+  });
+
+  it("omits agents when role filter excludes them", () => {
+    const matrix = computeAgentMatrix(rows, "30d", NOW, {
+      roleMapping,
+      escalationMetric: "handoff",
+      roleFilter: "TIER2"
+    });
+    expect(matrix.find((entry) => entry.agent === "Agent Matrix")).toBeUndefined();
   });
 });
 

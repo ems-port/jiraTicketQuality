@@ -1,7 +1,14 @@
 export type TimeWindow = "24h" | "7d" | "30d";
 
 export type AgentRole = "TIER1" | "TIER2" | "NON_AGENT";
+export type AgentSaveState = "idle" | "saving" | "saved" | "error";
 export type EscalationMetricKind = "tier" | "handoff";
+
+export interface AgentDirectoryEntry {
+  agentId: string;
+  displayName: string;
+  role: AgentRole;
+}
 
 export type SentimentLabel =
   | "Delight"
@@ -93,14 +100,22 @@ export interface ToxicityEntry {
   meanToxicity: number;
   ticketKeys: string[];
   messageCount: number;
+  abusiveTicketCount: number;
+  totalTicketCount: number;
+  swearCount: number;
+  averageCustomerScore: number | null;
+  abusiveTicketKeys: string[];
 }
 
 export interface AgentMatrixRow {
   agent: string;
   avgFirstResponseMinutes: number | null;
   avgAgentResponseMinutes: number | null;
+  avgResolutionDurationMinutes: number | null;
   resolvedRate: number | null;
+  avgAgentScore: number | null;
   escalatedCount: number;
+  misclassifiedCount: number;
 }
 
 export interface EscalationSeriesEntry {

@@ -3,37 +3,29 @@ import clsx from "clsx";
 
 import { formatDateTimeLocal } from "@/lib/date";
 import { resolveDisplayName } from "@/lib/displayNames";
-import type { ConversationRow, SentimentLabel } from "@/types";
+import type { ConversationRow } from "@/types";
 
 type ManagerReviewPanelProps = {
+  open: boolean;
+  onClose: () => void;
   rows: ConversationRow[];
   mapping: Record<string, string>;
+  agentMapping: Record<string, string>;
   deAnonymize: boolean;
 };
 
 const MAX_REVIEW_ROWS = 200;
-const SENTIMENT_BADGES: Record<SentimentLabel, string> = {
-  Delight: "bg-emerald-500/20 text-emerald-100 border-emerald-500/40",
-  Convenience: "bg-sky-500/20 text-sky-100 border-sky-500/40",
-  Trust: "bg-cyan-500/20 text-cyan-100 border-cyan-500/40",
-  Frustration: "bg-amber-500/20 text-amber-100 border-amber-500/40",
-  Disappointment: "bg-orange-500/20 text-orange-100 border-orange-500/40",
-  Concern: "bg-yellow-500/20 text-yellow-100 border-yellow-500/40",
-  Hostility: "bg-rose-500/20 text-rose-100 border-rose-500/40",
-  Neutral: "bg-slate-600/30 text-slate-100 border-slate-500/40"
-};
-const SENTIMENT_ORDER: SentimentLabel[] = [
-  "Delight",
-  "Convenience",
-  "Trust",
-  "Frustration",
-  "Disappointment",
-  "Concern",
-  "Hostility",
-  "Neutral"
-];
-
-export function ManagerReviewPanel({ rows, mapping, deAnonymize }: ManagerReviewPanelProps) {
+export function ManagerReviewPanel({
+  open,
+  onClose,
+  rows,
+  mapping,
+  agentMapping,
+  deAnonymize
+}: ManagerReviewPanelProps) {
+  if (!open) {
+    return null;
+  }
   const reviewableRows = useMemo(() => rows.slice(0, MAX_REVIEW_ROWS), [rows]);
   const [selectedIssueKey, setSelectedIssueKey] = useState(reviewableRows[0]?.issueKey ?? "");
 
@@ -49,29 +41,29 @@ export function ManagerReviewPanel({ rows, mapping, deAnonymize }: ManagerReview
 
   if (!reviewableRows.length) {
     return (
-      <section className="rounded-3xl border border-slate-800 bg-slate-950/60 p-6">
-        <h2 className="text-xl font-semibold text-white">Manager Review Panel</h2>
-        <p className="mt-2 text-sm text-slate-400">
-          Load a conversation dataset to see model explanations, reasoning, and sentiment diagnostics.
-        </p>
-      </section>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4">
+        <section className="w-[min(1100px,95vw)] rounded-3xl border border-slate-800 bg-slate-950/60 p-6 text-center text-slate-300">
+          <h2 className="text-xl font-semibold text-white">Manager Review Panel</h2>
+          <p className="mt-2 text-sm">
+            Load a conversation dataset to see model explanations, reasoning, and sentiment diagnostics.
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="mt-4 rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
+          >
+            Close
+          </button>
+        </section>
+      </div>
     );
   }
 
   const selected =
     reviewableRows.find((row) => row.issueKey === selectedIssueKey) ?? reviewableRows[0];
-  const agentDisplay = resolveDisplayName(selected.agent, mapping, deAnonymize);
+  const agentDisplay = resolveDisplayName(selected.agent, mapping, deAnonymize, agentMapping);
   const customerId = selected.customerList[0] ?? "Customer";
   const customerDisplay = resolveDisplayName(customerId, mapping, deAnonymize);
-  const sentimentPrimary = selected.customerSentimentPrimary ?? "Neutral";
-  const sentimentScores = selected.customerSentimentScores;
-
-  const sentimentTooltip = sentimentScores
-    ? SENTIMENT_ORDER.map(
-        (label) => `${label}: ${Math.round((sentimentScores[label] ?? 0) * 100)}%`
-      ).join(" · ")
-    : "Sentiment distribution unavailable";
-
   const steps =
     selected.stepsExtract && selected.stepsExtract.length
       ? selected.stepsExtract
@@ -84,7 +76,8 @@ export function ManagerReviewPanel({ rows, mapping, deAnonymize }: ManagerReview
   const resolutionMarker = buildResolutionMarker(selected);
 
   return (
-    <section className="rounded-3xl border border-slate-800 bg-slate-950/70 p-6 shadow-inner">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 overflow-auto">
+    <section className="w-[min(1100px,95vw)] rounded-3xl border border-slate-800 bg-slate-950/70 p-6 shadow-inner">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h2 className="text-xl font-semibold text-white">Manager Review Panel</h2>
@@ -112,6 +105,13 @@ export function ManagerReviewPanel({ rows, mapping, deAnonymize }: ManagerReview
             {rows.length.toLocaleString()} filtered tickets.
           </div>
         </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="self-start rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
+        >
+          Close
+        </button>
       </header>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
@@ -183,16 +183,6 @@ export function ManagerReviewPanel({ rows, mapping, deAnonymize }: ManagerReview
         <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h3 className="text-lg font-semibold text-white">LLM Explanation</h3>
-            <span
-              className={clsx(
-                "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold",
-                SENTIMENT_BADGES[sentimentPrimary]
-              )}
-              title={sentimentTooltip}
-            >
-              <span className="h-2 w-2 rounded-full bg-current" />
-              {sentimentPrimary}
-            </span>
           </div>
           <p className="mt-2 text-sm text-slate-300">
             Ratings — Conversation: {selected.conversationRating ?? "—"} · Agent:{" "}
@@ -255,34 +245,41 @@ export function ManagerReviewPanel({ rows, mapping, deAnonymize }: ManagerReview
           </div>
         </div>
         <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
-            Sentiment distribution
-          </h3>
-          {sentimentScores ? (
-            <dl className="mt-3 grid gap-2 text-sm text-slate-200 md:grid-cols-2">
-              {SENTIMENT_ORDER.map((label) => (
-                <div key={label} className="rounded-xl border border-slate-800 bg-slate-950/30 p-3">
-                  <dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt>
-                  <dd className="mt-1 font-semibold text-white">
-                    {Math.round((sentimentScores[label] ?? 0) * 100)}%
-                  </dd>
-                  <div className="mt-2 h-1.5 rounded-full bg-slate-800">
-                    <div
-                      className="h-full rounded-full bg-brand-500"
-                      style={{ width: `${Math.round((sentimentScores[label] ?? 0) * 100)}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </dl>
-          ) : (
-            <p className="mt-3 text-sm text-slate-400">
-              Sentiment scores are unavailable for this ticket.
-            </p>
-          )}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 className="text-lg font-semibold text-white">LLM Explanation</h3>
+          </div>
+          <p className="mt-2 text-sm  text-slate-300">
+            Ratings — Conversation: {selected.conversationRating ?? "—"} · Agent:{" "}
+            {selected.agentScore ?? "—"} · Customer: {selected.customerScore ?? "—"}
+          </p>
+          <div className="mt-4 space-y-3">
+            <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Improvement tip</p>
+              <p className="mt-1 text-sm text-slate-200">{selected.improvementTip ?? "—"}</p>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Why unresolved?</p>
+              <p className="mt-1 text-sm text-slate-200">
+                {selected.resolutionWhy ?? "Model did not capture a reason."}
+              </p>
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">LLM steps</p>
+              <ol className="mt-2 list-inside list-decimal space-y-1 text-sm text-slate-200">
+                {steps.map((step, index) => (
+                  <li key={`${selected.issueKey}-step-${index}`}>{step}</li>
+                ))}
+              </ol>
+            </div>
+          </div>
+          <div className="mt-4 text-xs text-slate-400">
+            <p>Conversation start: {formatDateTimeLocal(selected.startedAt)}</p>
+            <p>Conversation end: {formatDateTimeLocal(selected.endedAt)}</p>
+          </div>
         </div>
       </div>
     </section>
+    </div>
   );
 }
 

@@ -7,10 +7,18 @@ export interface DisplayNameResult {
 export function resolveDisplayName(
   id: string,
   mapping: Record<string, string>,
-  enabled: boolean
+  enabled: boolean,
+  agentMapping?: Record<string, string>
 ): DisplayNameResult {
   if (!id) {
     return { label: "Unknown", mapped: true, original: id };
+  }
+
+  if (agentMapping && agentMapping[id]) {
+    const preferred = agentMapping[id];
+    if (preferred.trim().length) {
+      return { label: preferred, mapped: true, original: id };
+    }
   }
 
   if (!enabled) {
@@ -28,7 +36,8 @@ export function resolveDisplayName(
 export function resolveDisplayList(
   ids: string[],
   mapping: Record<string, string>,
-  enabled: boolean
+  enabled: boolean,
+  agentMapping?: Record<string, string>
 ): DisplayNameResult[] {
-  return ids.map((id) => resolveDisplayName(id, mapping, enabled));
+  return ids.map((id) => resolveDisplayName(id, mapping, enabled, agentMapping));
 }

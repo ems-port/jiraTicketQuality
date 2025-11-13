@@ -16,6 +16,7 @@ import {
   ToxicityEntry
 } from "@/types";
 import { getEscalationDetails, isEscalated } from "@/lib/escalations";
+import { resolveAgentRole } from "@/lib/roles";
 
 const TIME_WINDOW_DURATIONS: Record<TimeWindow, number> = {
   "24h": 24 * 60 * 60 * 1000,
@@ -25,6 +26,7 @@ const TIME_WINDOW_DURATIONS: Record<TimeWindow, number> = {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIVE_DAYS_MS = 5 * DAY_MS;
+const SWEAR_NORMALIZER = 5; // roughly five explicit hits per abusive ticket maxes the swear factor
 
 type PrimitiveRecord = Record<string, string | number | boolean | null | undefined>;
 
@@ -221,6 +223,17 @@ export function computeResolvedStats(rows: ConversationRow[]): {
   return { count, total, percentage };
 }
 
+export function computeAverageDurationToResolution(rows: ConversationRow[]): number | null {
+  const values = rows
+    .map((row) => row.durationToResolutionMinutes)
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+  if (!values.length) {
+    return null;
+  }
+  const sum = values.reduce((acc, value) => acc + value, 0);
+  return sum / values.length;
+}
+
 export function buildResolvedSeries(
   rows: ConversationRow[],
   now: Date = new Date()
@@ -396,10 +409,13 @@ export function computeContactReasonSummary(
 
 export function computeTopAgents(
   rows: ConversationRow[],
+  roleMapping: Record<string, AgentRole>,
   now: Date = new Date(),
-  limit = 5
+  options?: { limit?: number; roleFilter?: AgentRole | "All" }
 ): AgentPerformance[] {
   const windowed = filterByWindow(rows, "7d", now);
+  const limit = options?.limit ?? 5;
+  const roleFilter = options?.roleFilter ?? "All";
   const aggregations = new Map<
     string,
     {
@@ -415,6 +431,10 @@ export function computeTopAgents(
     }
     const dateKey = formatDateKey(row.endedAt ?? row.startedAt ?? now);
     row.agentList.forEach((agentName) => {
+      const agentRole = resolveAgentRole(agentName, roleMapping);
+      if (roleFilter !== "All" && agentRole !== roleFilter) {
+        return;
+      }
       const key = agentName || "Unassigned";
       const bucket =
         aggregations.get(key) ??
@@ -451,53 +471,99 @@ export function computeToxicCustomers(
   rows: ConversationRow[],
   settings: SettingsState,
   now: Date = new Date(),
-  limit = 5
+  options?: {
+    limit?: number;
+    window?: TimeWindow;
+  }
 ): ToxicityEntry[] {
-  const horizon = now.getTime() - FIVE_DAYS_MS;
-  const windowed = rows.filter((row) => {
-    const reference = row.endedAt ?? row.startedAt;
-    return reference ? reference.getTime() >= horizon : false;
-  });
+  const limit = options?.limit ?? 5;
+  const windowed = options?.window
+    ? filterByWindow(rows, options.window, now)
+    : rows.filter((row) => {
+        const reference = row.endedAt ?? row.startedAt;
+        return reference ? reference.getTime() >= now.getTime() - FIVE_DAYS_MS : false;
+      });
 
   const hasExplicitScore = windowed.some(
     (row) => typeof row.customerToxicityScore === "number" && !Number.isNaN(row.customerToxicityScore)
   );
   const aggregations = new Map<
     string,
-    { toxicity: number[]; tickets: Set<string>; messageCount: number }
+    {
+      tickets: Set<string>;
+      messageCount: number;
+      totalTickets: number;
+      abusiveTickets: number;
+      swearCount: number;
+      customerScoreTotal: number;
+      customerScoreCount: number;
+      abusiveTicketKeys: Set<string>;
+    }
   >();
 
   windowed.forEach((row) => {
     const toxicityValue = deriveCustomerToxicity(row, settings, hasExplicitScore);
-    if (toxicityValue <= 0) {
-      return;
-    }
     const messageCount = row.messagesCustomer ?? 0;
+    const isAbusive =
+      row.customerAbusiveFlag ||
+      row.customerAbuseDetected ||
+      (typeof row.customerAbuseCount === "number" && row.customerAbuseCount > 0);
+    const abuseHits =
+      typeof row.customerAbuseCount === "number" && row.customerAbuseCount > 0
+        ? row.customerAbuseCount
+        : isAbusive
+        ? 1
+        : 0;
+
     row.customerList.forEach((customer) => {
       const key = customer || "Customer";
       const bucket =
         aggregations.get(key) ??
         {
-          toxicity: [],
           tickets: new Set<string>(),
-          messageCount: 0
+          messageCount: 0,
+          totalTickets: 0,
+          abusiveTickets: 0,
+          swearCount: 0,
+          customerScoreTotal: 0,
+          customerScoreCount: 0,
+          abusiveTicketKeys: new Set<string>()
         };
-      bucket.toxicity.push(toxicityValue);
       bucket.tickets.add(row.issueKey);
       bucket.messageCount += messageCount;
+      bucket.totalTickets += 1;
+      if (isAbusive) {
+        bucket.abusiveTickets += 1;
+        bucket.swearCount += abuseHits;
+        bucket.abusiveTicketKeys.add(row.issueKey);
+      }
+      if (typeof row.customerScore === "number" && !Number.isNaN(row.customerScore)) {
+        bucket.customerScoreTotal += row.customerScore;
+        bucket.customerScoreCount += 1;
+      }
       aggregations.set(key, bucket);
     });
   });
 
-  const entries: ToxicityEntry[] = Array.from(aggregations.entries()).map(([entity, data]) => ({
-    entity,
-    meanToxicity: calculateMean(data.toxicity) ?? 0,
-    ticketKeys: Array.from(data.tickets),
-    messageCount: data.messageCount
-  }));
+  const entries: ToxicityEntry[] = Array.from(aggregations.entries()).map(([entity, data]) => {
+    const meanToxicity = data.swearCount * data.abusiveTickets;
+    const averageCustomerScore =
+      data.customerScoreCount > 0 ? data.customerScoreTotal / data.customerScoreCount : null;
+    return {
+      entity,
+      meanToxicity,
+      ticketKeys: Array.from(data.tickets),
+      messageCount: data.messageCount,
+      abusiveTicketCount: data.abusiveTickets,
+      totalTicketCount: data.totalTickets,
+      swearCount: data.swearCount,
+      averageCustomerScore,
+      abusiveTicketKeys: Array.from(data.abusiveTicketKeys)
+    };
+  });
 
   return entries
-    .filter((entry) => entry.meanToxicity > 0)
+    .filter((entry) => entry.abusiveTicketCount > 0)
     .sort((a, b) => b.meanToxicity - a.meanToxicity)
     .slice(0, limit);
 }
@@ -505,9 +571,10 @@ export function computeToxicCustomers(
 export function computeFlaggedAgents(
   rows: ConversationRow[],
   settings: SettingsState,
-  now: Date = new Date()
+  now: Date = new Date(),
+  options?: { window?: TimeWindow }
 ): ToxicityEntry[] {
-  const windowed = filterByWindow(rows, "7d", now);
+  const windowed = options?.window ? filterByWindow(rows, options.window, now) : filterByWindow(rows, "7d", now);
   const hasExplicitScore = windowed.some(
     (row) => typeof row.agentToxicityScore === "number" && !Number.isNaN(row.agentToxicityScore)
   );
@@ -537,7 +604,12 @@ export function computeFlaggedAgents(
       entity,
       meanToxicity: calculateMean(data.toxicity) ?? 0,
       ticketKeys: Array.from(data.tickets),
-      messageCount: data.tickets.size
+      messageCount: data.tickets.size,
+      abusiveTicketCount: data.tickets.size,
+      totalTicketCount: data.tickets.size,
+      swearCount: 0,
+      averageCustomerScore: null,
+      abusiveTicketKeys: Array.from(data.tickets)
     }))
     .sort((a, b) => b.meanToxicity - a.meanToxicity);
 }
@@ -546,10 +618,15 @@ export function computeAgentMatrix(
   rows: ConversationRow[],
   window: TimeWindow,
   now: Date = new Date(),
-  options?: { roleMapping?: Record<string, AgentRole>; escalationMetric?: EscalationMetricKind }
+  options?: {
+    roleMapping?: Record<string, AgentRole>;
+    escalationMetric?: EscalationMetricKind;
+    roleFilter?: AgentRole | "All";
+  }
 ): AgentMatrixRow[] {
   const roleMapping = options?.roleMapping ?? {};
   const escalationMetric = options?.escalationMetric ?? "handoff";
+  const roleFilter = options?.roleFilter ?? "All";
   const windowed = filterByWindow(rows, window, now);
   const aggregations = new Map<
     string,
@@ -561,6 +638,11 @@ export function computeAgentMatrix(
       resolvedCount: number;
       totalCount: number;
       escalatedCount: number;
+      resolutionDurationTotal: number;
+      resolutionDurationCount: number;
+      misclassifiedCount: number;
+      agentScoreTotal: number;
+      agentScoreCount: number;
     }
   >();
 
@@ -571,6 +653,10 @@ export function computeAgentMatrix(
     const owner = escalationDetails.owner;
 
     row.agentList.forEach((agentName) => {
+      const agentRole = resolveAgentRole(agentName, roleMapping);
+      if (roleFilter !== "All" && agentRole !== roleFilter) {
+        return;
+      }
       const key = agentName || "Unassigned";
       const bucket =
         aggregations.get(key) ??
@@ -581,7 +667,12 @@ export function computeAgentMatrix(
           avgResponseCount: 0,
           resolvedCount: 0,
           totalCount: 0,
-          escalatedCount: 0
+          escalatedCount: 0,
+          resolutionDurationTotal: 0,
+          resolutionDurationCount: 0,
+          misclassifiedCount: 0,
+          agentScoreTotal: 0,
+          agentScoreCount: 0
         };
 
       if (typeof row.firstAgentResponseMinutes === "number") {
@@ -594,10 +685,22 @@ export function computeAgentMatrix(
         bucket.avgResponseCount += 1;
       }
 
+      if (typeof row.durationToResolutionMinutes === "number") {
+        bucket.resolutionDurationTotal += row.durationToResolutionMinutes;
+        bucket.resolutionDurationCount += 1;
+      }
+
       bucket.resolvedCount += row.resolved ? 1 : 0;
       bucket.totalCount += 1;
+      if (typeof row.agentScore === "number" && !Number.isNaN(row.agentScore)) {
+        bucket.agentScoreTotal += row.agentScore;
+        bucket.agentScoreCount += 1;
+      }
       if (qualifies && owner && agentName === owner) {
         bucket.escalatedCount += 1;
+      }
+      if (row.contactReasonChange && owner && agentName === owner) {
+        bucket.misclassifiedCount += 1;
       }
 
       aggregations.set(key, bucket);
@@ -611,8 +714,15 @@ export function computeAgentMatrix(
         data.firstResponseCount > 0 ? data.firstResponseTotal / data.firstResponseCount : null,
       avgAgentResponseMinutes:
         data.avgResponseCount > 0 ? data.avgResponseTotal / data.avgResponseCount : null,
+      avgResolutionDurationMinutes:
+        data.resolutionDurationCount > 0
+          ? data.resolutionDurationTotal / data.resolutionDurationCount
+          : null,
       resolvedRate: data.totalCount > 0 ? data.resolvedCount / data.totalCount : null,
-      escalatedCount: data.escalatedCount
+      avgAgentScore:
+        data.agentScoreCount > 0 ? data.agentScoreTotal / data.agentScoreCount : null,
+      escalatedCount: data.escalatedCount,
+      misclassifiedCount: data.misclassifiedCount
     }))
     .sort((a, b) => a.agent.localeCompare(b.agent));
 }

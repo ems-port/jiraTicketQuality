@@ -2,7 +2,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-const SAMPLE_FILENAME = "convo_quality_550.csv";
+const SAMPLE_FILENAME = "convo_quality_Nov_5-mini.csv";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "GET") {

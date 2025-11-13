@@ -6,6 +6,7 @@ type AgentRankListProps = {
   title: string;
   agents: AgentPerformance[];
   mapping: Record<string, string>;
+  agentMapping: Record<string, string>;
   deAnonymize: boolean;
   roleMapping: Record<string, AgentRole>;
 };
@@ -14,6 +15,7 @@ export function AgentRankList({
   title,
   agents,
   mapping,
+  agentMapping,
   deAnonymize,
   roleMapping
 }: AgentRankListProps) {
@@ -38,6 +40,7 @@ export function AgentRankList({
                   <DisplayName
                     id={agent.agent}
                     mapping={mapping}
+                    agentMapping={agentMapping}
                     deAnonymize={deAnonymize}
                     titlePrefix="Agent ID"
                     showRole={true}

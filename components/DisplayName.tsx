@@ -7,6 +7,7 @@ import type { AgentRole } from "@/types";
 type DisplayNameProps = {
   id: string;
   mapping: Record<string, string>;
+  agentMapping?: Record<string, string>;
   deAnonymize: boolean;
   className?: string;
   titlePrefix?: string;
@@ -17,13 +18,14 @@ type DisplayNameProps = {
 export function DisplayName({
   id,
   mapping,
+  agentMapping,
   deAnonymize,
   className,
   titlePrefix,
   role,
   showRole = false
 }: DisplayNameProps) {
-  const result = resolveDisplayName(id, mapping, deAnonymize);
+  const result = resolveDisplayName(id, mapping, deAnonymize, agentMapping);
   const pillRole: AgentRole = role ?? "NON_AGENT";
   const identityTitle = deAnonymize
     ? titlePrefix

@@ -1,15 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 import clsx from "clsx";
+import { createPortal } from "react-dom";
 
 import { DisplayName } from "@/components/DisplayName";
 import { formatDateTimeLocal } from "@/lib/date";
 import { resolveDisplayName } from "@/lib/displayNames";
-import { getEscalationDetails } from "@/lib/escalations";
 import { resolveAgentRole } from "@/lib/roles";
 import { AgentRole, ConversationRow } from "@/types";
 
 const JIRA_BASE_URL = "https://portapp.atlassian.net/browse/";
+
+const SENTIMENT_COLORS: Record<string, string> = {
+  Delight: "text-emerald-200 bg-emerald-500/15 border-emerald-400/40",
+  Convenience: "text-sky-200 bg-sky-500/15 border-sky-400/40",
+  Trust: "text-cyan-200 bg-cyan-500/15 border-cyan-400/40",
+  Frustration: "text-amber-200 bg-amber-500/15 border-amber-400/40",
+  Disappointment: "text-orange-200 bg-orange-500/15 border-orange-400/40",
+  Concern: "text-yellow-200 bg-yellow-500/15 border-yellow-400/40",
+  Hostility: "text-rose-200 bg-rose-500/15 border-rose-400/40",
+  Neutral: "text-slate-200 bg-slate-600/20 border-slate-500/40"
+};
 
 type SortDirection = "asc" | "desc";
 
@@ -17,18 +28,16 @@ type SortKey =
   | "issueKey"
   | "agentLabel"
   | "customerLabel"
+  | "ticketSummary"
   | "resolved"
-  | "handoffAny"
-  | "escalatedTier"
-  | "escalationPath"
+  | "contactReasonOriginal"
+  | "contactReason"
+  | "reasonOverride"
   | "agentScore"
   | "customerScore"
-  | "startedAt"
-  | "endedAt"
-  | "durationMinutes"
-  | "abusive"
-  | "improvementTip"
-  | "ticketSummary";
+  | "sentiment"
+  | "resolutionWhy"
+  | "improvementTip";
 
 type DrilldownTableProps = {
   open: boolean;
@@ -36,6 +45,7 @@ type DrilldownTableProps = {
   rows: ConversationRow[];
   onClose: () => void;
   mapping: Record<string, string>;
+  agentMapping: Record<string, string>;
   deAnonymize: boolean;
   roleMapping: Record<string, AgentRole>;
 };
@@ -45,39 +55,34 @@ type TableRow = {
   agentId: string;
   agentLabel: string;
   agentRole: AgentRole;
-  handoffAny: boolean;
-  escalatedTier: boolean;
-  escalationPath: string;
   customerId: string;
   customerLabel: string;
   resolved: boolean;
+  ticketSummary: string;
+  contactReasonOriginal: string;
+  contactReason: string;
+  reasonOverride: string;
   agentScore: number | null;
   customerScore: number | null;
-  startedAt: Date | null;
-  endedAt: Date | null;
-  durationMinutes: number | null;
-  abusive: boolean;
-  abusiveReason: string | null;
+  sentiment: string;
   improvementTip: string;
-  ticketSummary: string;
+  resolutionWhy: string;
 };
 
 const HEADERS: { key: SortKey; label: string }[] = [
   { key: "issueKey", label: "Issue Key" },
   { key: "agentLabel", label: "Agent" },
   { key: "customerLabel", label: "Customer" },
+  { key: "ticketSummary", label: "Ticket summary" },
   { key: "resolved", label: "Resolved" },
-  { key: "handoffAny", label: "Handovers T1→Any" },
-  { key: "escalatedTier", label: "Escalation T1→T2" },
-  { key: "escalationPath", label: "Escalation path" },
+  { key: "contactReasonOriginal", label: "Original contact reason" },
+  { key: "contactReason", label: "Corrected contact reason" },
+  { key: "reasonOverride", label: "Reason to change" },
   { key: "agentScore", label: "Agent Score" },
   { key: "customerScore", label: "Customer Score" },
-  { key: "startedAt", label: "Started" },
-  { key: "endedAt", label: "Ended" },
-  { key: "durationMinutes", label: "Duration (min)" },
-  { key: "abusive", label: "Abusive language used" },
-  { key: "improvementTip", label: "Improvement tip" },
-  { key: "ticketSummary", label: "Ticket summary" }
+  { key: "sentiment", label: "Customer sentiment" },
+  { key: "resolutionWhy", label: "Resolution summary" },
+  { key: "improvementTip", label: "Improvement tip" }
 ];
 
 export function DrilldownTable({
@@ -86,43 +91,39 @@ export function DrilldownTable({
   rows,
   onClose,
   mapping,
+  agentMapping,
   deAnonymize,
   roleMapping
 }: DrilldownTableProps) {
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: SortDirection }>({
-    key: "endedAt",
+    key: "issueKey",
     direction: "desc"
   });
 
   const tableRows = useMemo<TableRow[]>(
     () =>
       rows.map((row) => {
-        const agentDisplay = resolveDisplayName(row.agent, mapping, deAnonymize);
+        const agentDisplay = resolveDisplayName(row.agent, mapping, deAnonymize, agentMapping);
         const customerId = row.customerList[0] ?? "Customer";
         const customerDisplay = resolveDisplayName(customerId, mapping, deAnonymize);
-        const abusiveReason = buildAbusiveReason(row);
         const agentRole = resolveAgentRole(row.agent, roleMapping);
-        const escalation = getEscalationDetails(row, roleMapping);
         return {
           issueKey: row.issueKey,
           agentId: row.agent,
           agentLabel: agentDisplay.label,
           agentRole,
-          handoffAny: escalation.handoffAny,
-          escalatedTier: escalation.tierHandoff,
-          escalationPath: escalation.path,
           customerId,
           customerLabel: customerDisplay.label,
           resolved: row.resolved,
+          ticketSummary: row.ticketSummary ?? "",
+          contactReasonOriginal: row.contactReasonOriginal ?? "Unspecified",
+          contactReason: row.contactReason ?? "Unspecified",
+          reasonOverride: row.reasonOverrideWhy ?? "",
           agentScore: row.agentScore,
           customerScore: row.customerScore,
-          startedAt: row.startedAt,
-          endedAt: row.endedAt,
-          durationMinutes: row.durationMinutes,
-          abusive: row.customerAbuseDetected || row.agentProfanityDetected,
-          abusiveReason,
+          sentiment: row.customerSentimentPrimary ?? "Neutral",
           improvementTip: row.improvementTip ?? "",
-          ticketSummary: row.ticketSummary ?? ""
+          resolutionWhy: row.resolutionWhy ?? ""
         };
       }),
     [rows, mapping, deAnonymize, roleMapping]
@@ -149,21 +150,18 @@ export function DrilldownTable({
         agent_id: row.agentId,
         agent: row.agentLabel,
         agent_role: row.agentRole,
-        handover_t1_any: row.handoffAny ? "Yes" : "No",
-        escalated_tier_handoff: row.escalatedTier ? "Yes" : "No",
-        escalation_path: row.escalationPath,
         customer_id: row.customerId,
+        customer: row.customerLabel,
+        ticket_summary: row.ticketSummary ?? "",
         resolved: row.resolved ? "Yes" : "No",
+        contact_reason_original: row.contactReasonOriginal,
+        contact_reason_corrected: row.contactReason,
+        reason_to_change: row.reasonOverride,
         agent_score: row.agentScore ?? "",
         customer_score: row.customerScore ?? "",
-        started_at: formatDateTimeLocal(row.startedAt),
-        ended_at: formatDateTimeLocal(row.endedAt),
-        duration_minutes: row.durationMinutes ?? "",
-        abusive_language_used: row.abusive ? "Yes" : "No",
-        abusive_reason: row.abusiveReason ?? "",
-        customer: row.customerLabel,
-        improvement_tip: row.improvementTip ?? "",
-        ticket_summary: row.ticketSummary ?? ""
+        customer_sentiment: row.sentiment,
+        resolution_summary: row.resolutionWhy ?? "",
+        improvement_tip: row.improvementTip ?? ""
       }))
     );
     const blob = new Blob([csv], { type: "text/csv" });
@@ -191,7 +189,7 @@ export function DrilldownTable({
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/90 backdrop-blur">
-      <div className="flex max-h-[90vh] w-[min(1100px,92vw)] flex-col overflow-hidden rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl">
+      <div className="flex max-h-[90vh] min-h-[60vh] w-[min(1200px,96vw)] flex-col overflow-visible rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl">
         <header className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
           <div>
             <h2 className="text-lg font-semibold text-white">{metricLabel}</h2>
@@ -270,6 +268,7 @@ export function DrilldownTable({
                     <DisplayName
                       id={row.agentId}
                       mapping={mapping}
+                      agentMapping={agentMapping}
                       deAnonymize={deAnonymize}
                       titlePrefix="Agent ID"
                       showRole={true}
@@ -285,46 +284,50 @@ export function DrilldownTable({
                     />
                   </td>
                   <td className="px-4 py-3">
+                    <TruncatedText value={row.ticketSummary} />
+                  </td>
+                  <td className="px-4 py-3">
                     {row.resolved ? (
                       <span className="text-emerald-300">Yes</span>
                     ) : (
-                      <span className="text-slate-300">No</span>
+                      <span
+                        className="text-amber-300"
+                        title={row.resolutionWhy ? `Resolution summary: ${row.resolutionWhy}` : undefined}
+                      >
+                        No
+                      </span>
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    {row.handoffAny ? (
-                      <span className="text-amber-200">Yes</span>
-                    ) : (
-                      <span className="text-slate-300">No</span>
-                    )}
+                    <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-100">
+                      <span className="h-2 w-2 rounded-full bg-amber-300" />
+                      <TruncatedText value={row.contactReasonOriginal} />
+                    </span>
                   </td>
                   <td className="px-4 py-3">
-                    {row.escalatedTier ? (
-                      <span className="text-brand-200">Yes</span>
-                    ) : (
-                      <span className="text-slate-300">No</span>
-                    )}
+                    <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-100">
+                      <span className="h-2 w-2 rounded-full bg-emerald-300" />
+                      <TruncatedText value={row.contactReason} />
+                    </span>
                   </td>
-                  <td className="px-4 py-3 text-slate-200">
-                    {row.escalationPath ? row.escalationPath : "—"}
+                  <td className="px-4 py-3">
+                    <TruncatedText value={row.reasonOverride || "—"} />
                   </td>
                   <td className="px-4 py-3">{formatNumber(row.agentScore)}</td>
                   <td className="px-4 py-3">{formatNumber(row.customerScore)}</td>
-                  <td className="px-4 py-3">{formatDateTimeLocal(row.startedAt)}</td>
-                  <td className="px-4 py-3">{formatDateTimeLocal(row.endedAt)}</td>
-                  <td className="px-4 py-3">{formatNumber(row.durationMinutes)}</td>
-                  <td className="px-4 py-3" title={row.abusiveReason ?? undefined}>
-                    {row.abusive ? (
-                      <span className="text-red-300">Yes</span>
-                    ) : (
-                      <span className="text-slate-300">No</span>
-                    )}
+                  <td className="px-4 py-3">
+                    <span
+                      className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-semibold ${sentimentBadgeClass(row.sentiment)}`}
+                    >
+                      <span className="h-2 w-2 rounded-full bg-current opacity-80" />
+                      {row.sentiment}
+                    </span>
                   </td>
                   <td className="px-4 py-3">
-                    {renderTruncatedCell(row.improvementTip)}
+                    <TruncatedText value={row.resolutionWhy} />
                   </td>
                   <td className="px-4 py-3">
-                    {renderTruncatedCell(row.ticketSummary)}
+                    <TruncatedText value={row.improvementTip} />
                   </td>
                 </tr>
               ))}
@@ -350,21 +353,60 @@ function formatNumber(value: number | null): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-function renderTruncatedCell(value: string): JSX.Element {
+function TruncatedText({ value }: { value: string }) {
   const display = value && value.trim().length ? value : "—";
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [tooltip, setTooltip] = useState<{ top: number; left: number; width: number; content: string } | null>(null);
+
+  const showTooltip = () => {
+    if (!wrapperRef.current || typeof window === "undefined" || display === "—") {
+      return;
+    }
+    const rect = wrapperRef.current.getBoundingClientRect();
+    const width = Math.min(320, window.innerWidth - 40);
+    const rawLeft = rect.left + rect.width / 2 - width / 2;
+    const left = Math.min(window.innerWidth - 20 - width, Math.max(20, rawLeft));
+    const top = Math.min(window.innerHeight - 20, rect.bottom + 12);
+    setTooltip({ top, left, width, content: display });
+  };
+
+  const hideTooltip = () => {
+    setTooltip(null);
+  };
+
   if (display === "—") {
     return <span className="text-slate-300">—</span>;
   }
+
   return (
-    <div className="group relative max-w-[18rem]" tabIndex={0}>
-      <span className="block truncate text-slate-100">{display}</span>
-      <div className="pointer-events-none absolute left-1/2 top-full z-30 hidden w-64 -translate-x-1/2 translate-y-2 rounded-xl border border-slate-700 bg-slate-900/95 p-3 text-xs text-slate-100 shadow-xl group-hover:block group-focus-within:block">
-        <div className="pointer-events-auto max-h-48 whitespace-pre-wrap break-words">
-          {display}
-        </div>
+    <>
+      <div
+        ref={wrapperRef}
+        className="max-w-[18rem] cursor-help"
+        tabIndex={0}
+        onMouseEnter={showTooltip}
+        onFocus={showTooltip}
+        onMouseLeave={hideTooltip}
+        onBlur={hideTooltip}
+      >
+        <span className="block truncate text-slate-100">{display}</span>
       </div>
-    </div>
+      {tooltip &&
+        createPortal(
+          <div
+            className="pointer-events-none fixed z-[2000] max-h-48 overflow-auto rounded-xl border border-slate-700 bg-slate-900/95 p-3 text-xs text-slate-100 shadow-2xl"
+            style={{ top: tooltip.top, left: tooltip.left, width: tooltip.width }}
+          >
+            {tooltip.content}
+          </div>,
+          document.body
+        )}
+    </>
   );
+}
+
+function sentimentBadgeClass(label: string): string {
+  return SENTIMENT_COLORS[label] ?? "text-slate-200 bg-slate-600/20 border-slate-500/40";
 }
 
 function compareRows(a: TableRow, b: TableRow, key: SortKey, direction: SortDirection): number {
@@ -373,23 +415,19 @@ function compareRows(a: TableRow, b: TableRow, key: SortKey, direction: SortDire
     case "issueKey":
     case "agentLabel":
     case "customerLabel":
-    case "improvementTip":
     case "ticketSummary":
+    case "resolutionWhy":
+    case "contactReasonOriginal":
+    case "contactReason":
+    case "reasonOverride":
+    case "improvementTip":
+    case "sentiment":
       return a[key].localeCompare(b[key]) * multiplier;
     case "resolved":
-    case "abusive":
-    case "handoffAny":
-    case "escalatedTier":
       return (numberValue(a[key]) - numberValue(b[key])) * multiplier;
-    case "escalationPath":
-      return a.escalationPath.localeCompare(b.escalationPath) * multiplier;
     case "agentScore":
     case "customerScore":
-    case "durationMinutes":
       return (numberValue(a[key]) - numberValue(b[key])) * multiplier;
-    case "startedAt":
-    case "endedAt":
-      return (dateValue(a[key]) - dateValue(b[key])) * multiplier;
     default:
       return 0;
   }
@@ -403,34 +441,4 @@ function numberValue(value: number | boolean | null | undefined): number {
     return value;
   }
   return -Infinity;
-}
-
-function dateValue(value: Date | null): number {
-  return value ? value.getTime() : -Infinity;
-}
-
-function buildAbusiveReason(row: ConversationRow): string | null {
-  const reasons: string[] = [];
-  if (row.customerAbuseDetected) {
-    const scorePart =
-      typeof row.customerToxicityScore === "number"
-        ? `score ${row.customerToxicityScore.toFixed(2)}`
-        : row.customerAbuseCount
-        ? `count ${row.customerAbuseCount}`
-        : "heuristic trigger";
-    reasons.push(`Customer abuse detected (${scorePart})`);
-  }
-  if (row.agentProfanityDetected) {
-    const scorePart =
-      typeof row.agentToxicityScore === "number"
-        ? `score ${row.agentToxicityScore.toFixed(2)}`
-        : row.agentProfanityCount
-        ? `count ${row.agentProfanityCount}`
-        : "heuristic trigger";
-    reasons.push(`Agent profanity detected (${scorePart})`);
-  }
-  if (!reasons.length) {
-    return null;
-  }
-  return reasons.join(" · ");
 }

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
+import type { GetStaticProps } from "next";
 
 import { AgentMatrixHeatmap } from "@/components/AgentMatrixHeatmap";
 import { AgentRankList } from "@/components/AgentRankList";
+import { CustomerSentimentPanel } from "@/components/CustomerSentimentPanel";
 import { ContactReasonPanel } from "@/components/ContactReasonPanel";
 import { CommandCenterPanel } from "@/components/CommandCenterPanel";
 import { EscalationCard } from "@/components/EscalationCard";
@@ -19,6 +21,7 @@ import {
   buildResolvedSeries,
   computeAgentMatrix,
   computeAverageConversationRating,
+  computeAverageDurationToResolution,
   computeContactReasonSummary,
   buildEscalationSeries,
   computeFlaggedAgents,
@@ -33,7 +36,9 @@ import { isEscalated } from "@/lib/escalations";
 import { normalizeAgentRole, resolveAgentRole, formatRoleLabel } from "@/lib/roles";
 import { useDashboardStore } from "@/lib/useDashboardStore";
 import type {
+  AgentDirectoryEntry,
   AgentRole,
+  AgentSaveState,
   ConversationRow,
   EscalationMetricKind,
   EscalationSeriesEntry,
@@ -42,7 +47,19 @@ import type {
   TimeWindow
 } from "@/types";
 
+type AgentDirectoryState = Record<string, { displayName: string; role: AgentRole }>;
+
+type DashboardPageProps = {
+  initialAgentDirectory: AgentDirectoryState;
+  initialAgentOrder: string[];
+};
+
 const WINDOWS: TimeWindow[] = ["24h", "7d", "30d"];
+const WINDOW_LABELS: Record<TimeWindow, string> = {
+  "24h": "Last 24 hours",
+  "7d": "Last 7 days",
+  "30d": "Last 30 days"
+};
 const ROLE_FILTERS: AgentRole[] = ["TIER1", "TIER2", "NON_AGENT"];
 const SAMPLE_DATA_ENDPOINT = "/api/sample-data";
 const ROLE_DATA_ENDPOINT = "/api/roles";
@@ -58,7 +75,10 @@ type DrilldownState = {
   rows: ConversationRow[];
 } | null;
 
-export default function DashboardPage() {
+export default function DashboardPage({
+  initialAgentDirectory = {},
+  initialAgentOrder = []
+}: DashboardPageProps) {
   const rows = useDashboardStore((state) => state.rows);
   const setRows = useDashboardStore((state) => state.setRows);
   const sampleDataActive = useDashboardStore((state) => state.sampleDataActive);
@@ -66,8 +86,9 @@ export default function DashboardPage() {
   const setDeAnonymize = useDashboardStore((state) => state.setDeAnonymize);
   const idMapping = useDashboardStore((state) => state.idMapping);
   const setIdMapping = useDashboardStore((state) => state.setIdMapping);
+  const mergeIdMapping = useDashboardStore((state) => state.mergeIdMapping);
   const roleMapping = useDashboardStore((state) => state.roleMapping);
-  const mergeRoleMapping = useDashboardStore((state) => state.mergeRoleMapping);
+  const setRoleMapping = useDashboardStore((state) => state.setRoleMapping);
   const updateAgentRole = useDashboardStore((state) => state.updateAgentRole);
 
   const [selectedWindow, setSelectedWindow] = useState<TimeWindow>("7d");
@@ -75,18 +96,25 @@ export default function DashboardPage() {
   const [agentFilter, setAgentFilter] = useState("All");
   const [roleFilter, setRoleFilter] = useState<AgentRole | "All">("All");
   const [hubFilter, setHubFilter] = useState("All");
-  const [modelFilter, setModelFilter] = useState("All");
   const [escalationMetric, setEscalationMetric] = useState<EscalationMetricKind>("tier");
   const [settings, setSettings] = useState<SettingsState>(DEFAULT_SETTINGS);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [drilldownState, setDrilldownState] = useState<DrilldownState>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [mappingError, setMappingError] = useState<string | null>(null);
-  const [roleUploadError, setRoleUploadError] = useState<string | null>(null);
+  const [agentDirectory, setAgentDirectory] = useState<AgentDirectoryState>(initialAgentDirectory);
+  const [agentOrder, setAgentOrder] = useState<string[]>(initialAgentOrder);
+  const [agentSaveState, setAgentSaveState] = useState<Record<string, AgentSaveState>>({});
+  const [agentDirectoryError, setAgentDirectoryError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
   const [tipsDrilldownOpen, setTipsDrilldownOpen] = useState(false);
+  const [isManagerReviewOpen, setIsManagerReviewOpen] = useState(false);
   const initialLoadAttemptedRef = useRef(false);
   const initialRoleLoadAttemptedRef = useRef(false);
+
+  useEffect(() => {
+    setIdMapping({});
+  }, [setIdMapping]);
 
   const loadSampleData = useCallback(async () => {
     initialLoadAttemptedRef.current = true;
@@ -117,7 +145,7 @@ export default function DashboardPage() {
         return;
       }
       setRows(normalised, { sampleData: true });
-      setFileName("convo_quality_550.csv");
+      setFileName("convo_quality_Nov_5-mini.csv");
     } catch (error) {
       setFileError((error as Error).message ?? "Unable to load sample data.");
     }
@@ -134,7 +162,7 @@ export default function DashboardPage() {
     if (initialRoleLoadAttemptedRef.current) {
       return;
     }
-    if (Object.keys(roleMapping).length > 0) {
+    if (agentOrder.length) {
       initialRoleLoadAttemptedRef.current = true;
       return;
     }
@@ -152,10 +180,10 @@ export default function DashboardPage() {
           skipEmptyLines: true
         });
         if (parsed.errors.length) {
-          setRoleUploadError("Unable to parse default roles CSV. Please upload manually.");
-          return;
+          throw new Error("Unable to parse default roles CSV. Please verify the columns.");
         }
-        const updates: Record<string, AgentRole> = {};
+        const directory: Record<string, { displayName: string; role: AgentRole }> = {};
+        const order: string[] = [];
         parsed.data.forEach((row) => {
           if (!row) {
             return;
@@ -165,28 +193,47 @@ export default function DashboardPage() {
           )
             .toString()
             .trim();
+          if (!userId) {
+            return;
+          }
+          if (!order.includes(userId)) {
+            order.push(userId);
+          }
+          const displayName = (
+            row.display_name ?? row.displayName ?? row.name ?? row.agent_name ?? ""
+          )
+            .toString()
+            .trim();
           const roleValue = (
             row.port_role ?? row.portRole ?? row.role ?? (row as Record<string, unknown>).agent_role ?? ""
           )
             .toString()
             .trim();
-          if (userId && roleValue) {
-            updates[userId] = normalizeAgentRole(roleValue);
-          }
+          directory[userId] = {
+            displayName,
+            role: normalizeAgentRole(roleValue)
+          };
         });
-        const tieredEntries = Object.fromEntries(
-          Object.entries(updates).filter(([, role]) => role !== "NON_AGENT")
-        );
-        if (!Object.keys(tieredEntries).length) {
-          setRoleUploadError("Default roles CSV has no Tier 1 or Tier 2 agents. Upload an updated file.");
-          return;
+        if (!order.length) {
+          throw new Error("Default roles CSV has no agent entries.");
         }
-        mergeRoleMapping(tieredEntries);
+        setAgentDirectory(directory);
+        setAgentOrder(order);
+        setAgentSaveState((prev) => {
+          const next = { ...prev };
+          order.forEach((id) => {
+            if (!next[id]) {
+              next[id] = "idle";
+            }
+          });
+          return next;
+        });
+        setAgentDirectoryError(null);
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
-        setRoleUploadError((error as Error).message ?? "Unable to load default roles CSV.");
+        setAgentDirectoryError((error as Error).message ?? "Unable to load default roles CSV.");
       }
     };
 
@@ -194,13 +241,24 @@ export default function DashboardPage() {
     return () => {
       controller.abort();
     };
-  }, [mergeRoleMapping, roleMapping]);
+  }, [agentOrder.length]);
 
   useEffect(() => {
     if (!deAnonymize) {
       setMappingError(null);
     }
   }, [deAnonymize]);
+
+  useEffect(() => {
+    if (!agentOrder.length) {
+      return;
+    }
+    const nextRoleMap: Record<string, AgentRole> = {};
+    agentOrder.forEach((id) => {
+      nextRoleMap[id] = agentDirectory[id]?.role ?? "NON_AGENT";
+    });
+    setRoleMapping(nextRoleMap);
+  }, [agentDirectory, agentOrder, setRoleMapping]);
 
   const sourceRows = rows;
 
@@ -214,10 +272,9 @@ export default function DashboardPage() {
         roleFilter === "All" ||
         row.agentList.some((agent) => resolveAgentRole(agent, roleMapping) === roleFilter);
       const matchesHub = hubFilter === "All" || (row.hub ?? "Unassigned") === hubFilter;
-      const matchesModel = modelFilter === "All" || (row.model ?? "Unknown") === modelFilter;
-      return matchesSearch && matchesAgent && matchesRole && matchesHub && matchesModel;
+      return matchesSearch && matchesAgent && matchesRole && matchesHub;
     });
-  }, [sourceRows, searchTerm, agentFilter, roleFilter, hubFilter, modelFilter, roleMapping]);
+  }, [sourceRows, searchTerm, agentFilter, roleFilter, hubFilter, roleMapping]);
 
   const referenceNow = useMemo(() => {
     let latest: Date | null = null;
@@ -235,8 +292,8 @@ export default function DashboardPage() {
     [attributeFilteredRows, selectedWindow, referenceNow]
   );
 
-  const resolvedRows = useMemo(
-    () => filteredRows.filter((row) => row.resolved),
+  const unresolvedRows = useMemo(
+    () => filteredRows.filter((row) => !row.resolved),
     [filteredRows]
   );
 
@@ -296,6 +353,13 @@ export default function DashboardPage() {
       ? `${selectedEscalationStats.handoffCount.toLocaleString()} of ${selectedEscalationStats.total.toLocaleString()} handed over`
       : "No tickets in this window";
 
+  const averageDurationSeries = useMemo(
+    () => buildMetricSeries(attributeFilteredRows, computeAverageDurationToResolution, referenceNow),
+    [attributeFilteredRows, referenceNow]
+  );
+  const selectedAverageDuration =
+    averageDurationSeries.find((entry) => entry.window === selectedWindow)?.value ?? null;
+
   const selectedRating =
     ratingSeries.find((entry) => entry.window === selectedWindow)?.value ?? null;
 
@@ -304,28 +368,56 @@ export default function DashboardPage() {
     [filteredRows]
   );
 
-  const selectedResolvedPercentage = selectedResolvedStats.percentage;
+  const unresolvedCount =
+    selectedResolvedStats.total - selectedResolvedStats.count;
+  const unresolvedPercentage =
+    selectedResolvedStats.percentage === null
+      ? null
+      : 100 - selectedResolvedStats.percentage;
 
   const topAgents = useMemo(
-    () => computeTopAgents(attributeFilteredRows, referenceNow),
-    [attributeFilteredRows, referenceNow]
+    () =>
+      computeTopAgents(attributeFilteredRows, roleMapping, referenceNow, {
+        limit: 5,
+        roleFilter
+      }),
+    [attributeFilteredRows, roleMapping, referenceNow, roleFilter]
   );
   const toxicCustomers = useMemo(
-    () => computeToxicCustomers(attributeFilteredRows, settings, referenceNow),
-    [attributeFilteredRows, settings, referenceNow]
+    () =>
+      computeToxicCustomers(attributeFilteredRows, settings, referenceNow, {
+        window: selectedWindow
+      }),
+    [attributeFilteredRows, settings, referenceNow, selectedWindow]
   );
   const flaggedAgents = useMemo(
-    () => computeFlaggedAgents(attributeFilteredRows, settings, referenceNow),
-    [attributeFilteredRows, settings, referenceNow]
+    () =>
+      computeFlaggedAgents(attributeFilteredRows, settings, referenceNow, {
+        window: selectedWindow
+      }),
+    [attributeFilteredRows, settings, referenceNow, selectedWindow]
   );
   const agentMatrix = useMemo(
     () =>
       computeAgentMatrix(attributeFilteredRows, selectedWindow, referenceNow, {
         roleMapping,
-        escalationMetric
+        escalationMetric,
+        roleFilter
       }),
-    [attributeFilteredRows, selectedWindow, referenceNow, roleMapping, escalationMetric]
+    [attributeFilteredRows, selectedWindow, referenceNow, roleMapping, escalationMetric, roleFilter]
   );
+
+  const averageAgentScore = useMemo(() => {
+    const windowed = filterByWindow(attributeFilteredRows, selectedWindow, referenceNow);
+    const values = windowed
+      .map((row) => row.agentScore)
+      .filter((value): value is number => value !== null && !Number.isNaN(value));
+    if (!values.length) {
+      return null;
+    }
+    const sum = values.reduce((acc, value) => acc + value, 0);
+    return sum / values.length;
+  }, [attributeFilteredRows, selectedWindow, referenceNow]);
 
   const improvementTipSummary = useMemo(
     () => computeImprovementTips(attributeFilteredRows, referenceNow),
@@ -337,15 +429,46 @@ export default function DashboardPage() {
     [attributeFilteredRows, selectedWindow, referenceNow]
   );
 
+  const agentNameMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    Object.entries(agentDirectory).forEach(([id, entry]) => {
+      if (entry.displayName && entry.displayName.trim()) {
+        map[id] = entry.displayName.trim();
+      }
+    });
+    return map;
+  }, [agentDirectory]);
+
   const agentOptions = useMemo(() => {
     const values = new Set<string>();
     sourceRows.forEach((row) => row.agentList.forEach((agent) => values.add(agent)));
     return Array.from(values).sort((a, b) => {
-      const aLabel = resolveDisplayName(a, idMapping, deAnonymize).label.toLowerCase();
-      const bLabel = resolveDisplayName(b, idMapping, deAnonymize).label.toLowerCase();
+      const aLabel = resolveDisplayName(a, idMapping, deAnonymize, agentNameMap).label.toLowerCase();
+      const bLabel = resolveDisplayName(b, idMapping, deAnonymize, agentNameMap).label.toLowerCase();
       return aLabel.localeCompare(bLabel);
     });
-  }, [sourceRows, idMapping, deAnonymize]);
+  }, [sourceRows, idMapping, deAnonymize, agentNameMap]);
+
+  const agentDirectoryEntries = useMemo<AgentDirectoryEntry[]>(() => {
+    const combined = [...agentOrder];
+    agentOptions.forEach((id) => {
+      if (!combined.includes(id)) {
+        combined.push(id);
+      }
+    });
+    Object.keys(agentDirectory).forEach((id) => {
+      if (!combined.includes(id)) {
+        combined.push(id);
+      }
+    });
+    return combined.map((id) => ({
+      agentId: id,
+      displayName: agentDirectory[id]?.displayName ?? "",
+      role: agentDirectory[id]?.role ?? "NON_AGENT"
+    }));
+  }, [agentOptions, agentDirectory, agentOrder]);
+
+  const customerMappingCount = Object.keys(idMapping).length;
 
   const hubOptions = useMemo(() => {
     const values = new Set<string>();
@@ -353,11 +476,6 @@ export default function DashboardPage() {
     return Array.from(values).sort();
   }, [sourceRows]);
 
-  const modelOptions = useMemo(() => {
-    const values = new Set<string>();
-    sourceRows.forEach((row) => values.add(row.model ?? "Unknown"));
-    return Array.from(values).sort();
-  }, [sourceRows]);
 
   const handleConversationsFile = (file: File) => {
     setFileError(null);
@@ -411,7 +529,7 @@ export default function DashboardPage() {
           setMappingError("No valid user_id and display_name pairs found in the lookup CSV.");
           return;
         }
-        setIdMapping(nextMapping);
+        mergeIdMapping(nextMapping);
       },
       error: () => {
         setMappingError("Unable to read the lookup CSV.");
@@ -419,45 +537,64 @@ export default function DashboardPage() {
     });
   };
 
-  const handleRolesUpload = (file: File) => {
-    setRoleUploadError(null);
-    Papa.parse<Record<string, string | null | undefined>>(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        if (results.errors.length) {
-          setRoleUploadError("Unable to parse roles CSV. Check the header names.");
-          return;
-        }
-        const updates: Record<string, AgentRole> = {};
-        results.data.forEach((row) => {
-          if (!row) {
-            return;
-          }
-          const userId = (
-            row.user_id ?? row.userId ?? row.id ?? (row as Record<string, unknown>).agent_id ?? ""
-          )
-            .toString()
-            .trim();
-          const roleValue = (
-            row.port_role ?? row.portRole ?? row.role ?? (row as Record<string, unknown>).agent_role ?? ""
-          )
-            .toString()
-            .trim();
-          if (userId && roleValue) {
-            updates[userId] = normalizeAgentRole(roleValue);
-          }
-        });
-        if (!Object.keys(updates).length) {
-          setRoleUploadError("No user_id / role pairs detected in the CSV.");
-          return;
-        }
-        mergeRoleMapping(updates);
-      },
-      error: () => {
-        setRoleUploadError("Unable to read the selected roles CSV.");
-      }
+  const clearCustomerMapping = useCallback(() => {
+    setIdMapping({});
+    setMappingError(null);
+  }, [setIdMapping]);
+
+  const persistAgentDirectory = async (
+    nextDirectory: Record<string, { displayName: string; role: AgentRole }>,
+    nextOrder: string[]
+  ) => {
+    const entries = nextOrder.map((id) => ({
+      user_id: id,
+      display_name: nextDirectory[id]?.displayName ?? "",
+      port_role: nextDirectory[id]?.role ?? "NON_AGENT"
+    }));
+    const response = await fetch(ROLE_DATA_ENDPOINT, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entries })
     });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || "Unable to save agent directory.");
+    }
+  };
+
+  const handleAgentSave = async (
+    agentId: string,
+    payload: { displayName: string; role: AgentRole }
+  ) => {
+    const id = agentId.trim();
+    if (!id) {
+      return;
+    }
+    const displayName = payload.displayName.trim();
+    const normalizedRole = normalizeAgentRole(payload.role);
+    setAgentSaveState((prev) => ({ ...prev, [id]: "saving" }));
+    const nextDirectory = {
+      ...agentDirectory,
+      [id]: { displayName, role: normalizedRole }
+    };
+    const nextOrder = agentOrder.includes(id) ? agentOrder : [...agentOrder, id];
+    try {
+      await persistAgentDirectory(nextDirectory, nextOrder);
+      setAgentDirectory(nextDirectory);
+      setAgentOrder(nextOrder);
+      setAgentDirectoryError(null);
+      if (displayName) {
+        mergeIdMapping({ [id]: displayName });
+      }
+      updateAgentRole(id, normalizedRole);
+      setAgentSaveState((prev) => ({ ...prev, [id]: "saved" }));
+      setTimeout(() => {
+        setAgentSaveState((prev) => ({ ...prev, [id]: "idle" }));
+      }, 2000);
+    } catch (error) {
+      setAgentSaveState((prev) => ({ ...prev, [id]: "error" }));
+      setAgentDirectoryError((error as Error).message ?? "Unable to save agent directory.");
+    }
   };
 
   const openDrilldown = (metricLabel: string, data: ConversationRow[]) => {
@@ -477,9 +614,26 @@ export default function DashboardPage() {
     [filteredRows]
   );
 
+  const handleMisclassifiedDrilldown = useCallback(
+    (agentId: string) => {
+      if (!agentId) {
+        return;
+      }
+      const agentRows = filteredRows.filter(
+        (row) => row.contactReasonChange && row.agentList.includes(agentId)
+      );
+      if (!agentRows.length) {
+        return;
+      }
+      const display = resolveDisplayName(agentId, idMapping, deAnonymize, agentNameMap);
+      openDrilldown(`Misclassified: ${display.label}`, agentRows);
+    },
+    [filteredRows, idMapping, deAnonymize, agentNameMap]
+  );
+
   const conversationCount = filteredRows.length;
-  const resolvedFooterText = selectedResolvedStats.total
-    ? `${selectedResolvedStats.count.toLocaleString()} of ${selectedResolvedStats.total.toLocaleString()} resolved`
+  const unresolvedFooterText = selectedResolvedStats.total
+    ? `${unresolvedCount.toLocaleString()} of ${selectedResolvedStats.total.toLocaleString()} not resolved`
     : "No tickets in this window";
 
   return (
@@ -493,13 +647,22 @@ export default function DashboardPage() {
                 Monitor Jira LLM-assisted conversations with real-time scoring, escalation trends, and toxicity alerts.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => setIsSettingsOpen(true)}
-              className="self-start rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
-            >
-              Settings
-            </button>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setIsManagerReviewOpen(true)}
+                className="rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
+              >
+                Manager review
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                className="rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
+              >
+                Settings
+              </button>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
             <span className="rounded-full border border-brand-500/40 bg-brand-500/15 px-3 py-1 text-brand-100">
@@ -537,8 +700,8 @@ export default function DashboardPage() {
                   ))}
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="sm:col-span-2">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.5fr)_repeat(3,minmax(0,1fr))]">
+                <div className="w-full">
                   <label className="flex flex-col gap-2 text-sm text-slate-200">
                     Search issue key
                     <input
@@ -555,7 +718,9 @@ export default function DashboardPage() {
                   value={agentFilter}
                   onChange={setAgentFilter}
                   options={agentOptions}
-                  getLabel={(value) => resolveDisplayName(value, idMapping, deAnonymize).label}
+                  getLabel={(value) =>
+                    resolveDisplayName(value, idMapping, deAnonymize, agentNameMap).label
+                  }
                 />
                 <FilterSelect
                   label="Role"
@@ -570,16 +735,10 @@ export default function DashboardPage() {
                   onChange={setHubFilter}
                   options={hubOptions}
                 />
-                <FilterSelect
-                  label="Model"
-                  value={modelFilter}
-                  onChange={setModelFilter}
-                  options={modelOptions}
-                />
               </div>
             </section>
 
-            <section className="grid gap-4 md:grid-cols-3">
+            <section className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
               <KPICard
                 title="Conversation Score"
                 value={selectedRating}
@@ -589,15 +748,34 @@ export default function DashboardPage() {
                 onClick={() => openDrilldown("Conversation Score", filteredRows)}
               />
               <KPICard
-                title="Resolved conversations"
-                value={selectedResolvedPercentage}
+                title="Unresolved conversations"
+                value={unresolvedPercentage}
                 formatValue={(value) =>
                   value === null ? "—" : `${Math.round(value)}%`
                 }
-                footerText={resolvedFooterText}
-                series={resolvedSeries}
+                footerText={unresolvedFooterText}
+                series={resolvedSeries.map((entry) => ({
+                  ...entry,
+                  value:
+                    entry.value === null
+                      ? null
+                      : 100 - entry.value,
+                  count:
+                    entry.total !== undefined && entry.count !== undefined
+                      ? entry.total - entry.count
+                      : entry.count
+                }))}
                 selectedWindow={selectedWindow}
-                onClick={() => openDrilldown("Resolved conversations", resolvedRows)}
+                onClick={() => openDrilldown("Unresolved conversations", unresolvedRows)}
+              />
+              <KPICard
+                title="Average time to resolution"
+                value={selectedAverageDuration}
+                formatValue={formatDurationValue}
+                footerText="Mean duration_to_resolution"
+                series={averageDurationSeries}
+                selectedWindow={selectedWindow}
+                onClick={() => openDrilldown("Average resolution duration", filteredRows)}
               />
               <EscalationCard
                 mode={escalationMetric}
@@ -626,6 +804,7 @@ export default function DashboardPage() {
                   title="Top performing agents"
                   agents={topAgents.slice(0, 5)}
                   mapping={idMapping}
+                  agentMapping={agentNameMap}
                   deAnonymize={deAnonymize}
                   roleMapping={roleMapping}
                 />
@@ -633,10 +812,11 @@ export default function DashboardPage() {
               <div className="lg:col-span-1">
                 <ToxicityList
                   title="Most abusive customers"
-                  subtitle="Last 5 days"
+                  subtitle={WINDOW_LABELS[selectedWindow]}
                   entries={toxicCustomers.slice(0, 5)}
                   emptyLabel="No abusive customer behaviour detected."
                   mapping={idMapping}
+                  agentMapping={agentNameMap}
                   deAnonymize={deAnonymize}
                   entityLabel="Customer ID"
                 />
@@ -644,10 +824,11 @@ export default function DashboardPage() {
               <div className="lg:col-span-1">
                 <ToxicityList
                   title="Flagged abusive agents"
-                  subtitle="Last 7 days"
+                  subtitle={WINDOW_LABELS[selectedWindow]}
                   entries={flaggedAgents}
                   emptyLabel="No agents exceeded the toxicity threshold."
                   mapping={idMapping}
+                  agentMapping={agentNameMap}
                   deAnonymize={deAnonymize}
                   entityLabel="Agent ID"
                   showAgentRoles={true}
@@ -660,9 +841,18 @@ export default function DashboardPage() {
               rows={agentMatrix}
               window={selectedWindow}
               mapping={idMapping}
+              agentMapping={agentNameMap}
               deAnonymize={deAnonymize}
               roleMapping={roleMapping}
               escalationMetric={escalationMetric}
+              averageAgentScore={averageAgentScore}
+              onSelectMisclassified={handleMisclassifiedDrilldown}
+            />
+
+            <CustomerSentimentPanel
+              rows={filteredRows}
+              referenceNow={referenceNow}
+              window={selectedWindow}
             />
 
             <ContactReasonPanel
@@ -671,7 +861,6 @@ export default function DashboardPage() {
               onSelect={handleContactReasonSelect}
             />
 
-            <ManagerReviewPanel rows={filteredRows} mapping={idMapping} deAnonymize={deAnonymize} />
           </div>
 
           <CommandCenterPanel
@@ -682,17 +871,16 @@ export default function DashboardPage() {
             fileError={fileError}
             deAnonymize={deAnonymize}
             onToggleDeAnonymize={setDeAnonymize}
-            onUploadMapping={handleMappingUpload}
-          mappedCount={Object.keys(idMapping).length}
-          conversationCount={sourceRows.length}
-          mappingError={mappingError}
-          roleMapping={roleMapping}
-          onUploadRoles={handleRolesUpload}
-          roleUploadError={roleUploadError}
-          onRoleChange={updateAgentRole}
-          agentIds={agentOptions}
-          idMapping={idMapping}
-        />
+            customerMappingCount={customerMappingCount}
+            conversationCount={sourceRows.length}
+            mappingError={mappingError}
+            onUploadCustomerMapping={handleMappingUpload}
+            onClearCustomerMapping={clearCustomerMapping}
+            agentEntries={agentDirectoryEntries}
+            onAgentSave={handleAgentSave}
+            agentSaveState={agentSaveState}
+            agentDirectoryError={agentDirectoryError}
+          />
         </div>
       </div>
 
@@ -702,6 +890,7 @@ export default function DashboardPage() {
         rows={drilldownState?.rows ?? []}
         onClose={() => setDrilldownState(null)}
         mapping={idMapping}
+        agentMapping={agentNameMap}
         deAnonymize={deAnonymize}
         roleMapping={roleMapping}
       />
@@ -713,6 +902,7 @@ export default function DashboardPage() {
         windowEnd={improvementTipSummary.windowEnd}
         onClose={() => setTipsDrilldownOpen(false)}
         mapping={idMapping}
+        agentMapping={agentNameMap}
         deAnonymize={deAnonymize}
         roleMapping={roleMapping}
       />
@@ -722,6 +912,14 @@ export default function DashboardPage() {
         settings={settings}
         onClose={() => setIsSettingsOpen(false)}
         onChange={setSettings}
+      />
+      <ManagerReviewPanel
+        open={isManagerReviewOpen}
+        onClose={() => setIsManagerReviewOpen(false)}
+        rows={filteredRows}
+        mapping={idMapping}
+        agentMapping={agentNameMap}
+        deAnonymize={deAnonymize}
       />
     </main>
   );
@@ -733,6 +931,77 @@ function computePercentage(count: number | null, total: number | null): number |
   }
   return (count / total) * 100;
 }
+
+function formatDurationValue(value: number | null): string {
+  if (value === null || Number.isNaN(value)) {
+    return "—";
+  }
+  if (value >= 60) {
+    const hours = Math.floor(value / 60);
+    const minutes = Math.round(value % 60);
+    return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  return `${value.toFixed(1)}m`;
+}
+
+export const getStaticProps: GetStaticProps<DashboardPageProps> = async () => {
+  try {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const csvPath = path.join(process.cwd(), "data", "port_roles.csv");
+    const csvText = await fs.readFile(csvPath, "utf-8");
+    const parsed = Papa.parse<Record<string, string | null | undefined>>(csvText, {
+      header: true,
+      skipEmptyLines: true
+    });
+    const directory: AgentDirectoryState = {};
+    const order: string[] = [];
+    parsed.data.forEach((row) => {
+      if (!row) {
+        return;
+      }
+      const userId = (
+        row.user_id ?? row.userId ?? row.id ?? (row as Record<string, unknown>).agent_id ?? ""
+      )
+        .toString()
+        .trim();
+      if (!userId) {
+        return;
+      }
+      if (!order.includes(userId)) {
+        order.push(userId);
+      }
+      const displayName = (
+        row.display_name ?? row.displayName ?? row.name ?? row.agent_name ?? ""
+      )
+        .toString()
+        .trim();
+      const roleValue = (
+        row.port_role ?? row.portRole ?? row.role ?? (row as Record<string, unknown>).agent_role ?? ""
+      )
+        .toString()
+        .trim();
+      directory[userId] = {
+        displayName,
+        role: normalizeAgentRole(roleValue)
+      };
+    });
+    return {
+      props: {
+        initialAgentDirectory: directory,
+        initialAgentOrder: order
+      }
+    };
+  } catch (error) {
+    console.warn("Failed to preload agent directory:", error);
+    return {
+      props: {
+        initialAgentDirectory: {},
+        initialAgentOrder: []
+      }
+    };
+  }
+};
 
 type FilterSelectProps = {
   label: string;

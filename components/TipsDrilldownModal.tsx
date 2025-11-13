@@ -12,6 +12,7 @@ type TipsDrilldownModalProps = {
   windowEnd: Date;
   onClose: () => void;
   mapping: Record<string, string>;
+  agentMapping: Record<string, string>;
   deAnonymize: boolean;
   roleMapping: Record<string, AgentRole>;
 };
@@ -23,6 +24,7 @@ export function TipsDrilldownModal({
   windowEnd,
   onClose,
   mapping,
+  agentMapping,
   deAnonymize,
   roleMapping
 }: TipsDrilldownModalProps) {
@@ -79,6 +81,7 @@ export function TipsDrilldownModal({
                             <DisplayName
                               id={agent}
                               mapping={mapping}
+                              agentMapping={agentMapping}
                               deAnonymize={deAnonymize}
                               titlePrefix="Agent ID"
                               showRole={true}
