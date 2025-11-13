@@ -53,7 +53,9 @@ export function AgentMatrixHeatmap({
       if (typeof aValue === "string" && typeof bValue === "string") {
         return aValue.localeCompare(bValue) * modifier;
       }
-      return ((aValue ?? 0) - (bValue ?? 0)) * modifier;
+      const aNumber = typeof aValue === "number" ? aValue : Number(aValue ?? 0);
+      const bNumber = typeof bValue === "number" ? bValue : Number(bValue ?? 0);
+      return (aNumber - bNumber) * modifier;
     });
     return data;
   }, [rows, sortConfig]);
