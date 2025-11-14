@@ -217,7 +217,12 @@ async function callPythonFunction(path: string, payload?: Record<string, unknown
   console.info("[refresh] calling", url, payload || {});
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(process.env.REFRESH_CRON_SECRET
+        ? { Authorization: `Bearer ${process.env.REFRESH_CRON_SECRET}` }
+        : {})
+    },
     body: payload ? JSON.stringify(payload) : undefined
   });
   if (!response.ok) {
@@ -313,6 +318,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   if (req.method === "POST") {
+    if (process.env.NEXT_PUBLIC_REFRESH_DISABLED === "1") {
+      res.status(501).json({ error: "Refresh job disabled in this deployment." });
+      return;
+    }
     if (jobState.running) {
       res.status(409).json(jobState);
       return;
