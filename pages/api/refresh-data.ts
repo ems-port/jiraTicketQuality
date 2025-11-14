@@ -1,7 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { spawn } from "node:child_process";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import { NextApiRequest, NextApiResponse } from "next";
 
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const INGEST_SCRIPT = "jiraPull/injestionJiraTickes.py";
