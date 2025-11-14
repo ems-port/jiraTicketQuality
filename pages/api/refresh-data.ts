@@ -211,10 +211,31 @@ function isProductionHosted(): boolean {
   return process.env.VERCEL === "1";
 }
 
+function getInvocationTarget() {
+  const internalUrl = process.env.INTERNAL_FUNCTIONS_URL?.replace(/\/$/, "");
+  const internalToken = process.env.INTERNAL_FUNCTIONS_TOKEN;
+  if (internalUrl && internalToken) {
+    return {
+      urlBase: internalUrl,
+      authorization: `Bearer ${internalToken}`,
+      mode: "internal" as const
+    };
+  }
+  const fallbackHost = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : `http://localhost:${process.env.PORT || 3000}`;
+  const secret = process.env.REFRESH_CRON_SECRET ? `Bearer ${process.env.REFRESH_CRON_SECRET}` : undefined;
+  return {
+    urlBase: fallbackHost.replace(/\/$/, ""),
+    authorization: secret,
+    mode: process.env.VERCEL_URL ? ("public" as const) : ("local" as const)
+  };
+}
+
 async function callPythonFunction(path: string, payload?: Record<string, unknown>) {
-  const host = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${process.env.PORT || 3000}`;
-  const url = `${host}${path}`;
-  console.info("[refresh] calling", url, payload || {});
+  const target = getInvocationTarget();
+  const url = `${target.urlBase}${path}`;
+  console.info("[refresh] calling", url, { mode: target.mode, hasPayload: Boolean(payload) });
 
   let response: Response;
   try {
@@ -222,9 +243,7 @@ async function callPythonFunction(path: string, payload?: Record<string, unknown
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(process.env.REFRESH_CRON_SECRET
-          ? { Authorization: `Bearer ${process.env.REFRESH_CRON_SECRET}` }
-          : {})
+        ...(target.authorization ? { Authorization: target.authorization } : {})
       },
       body: payload ? JSON.stringify(payload) : undefined
     });
