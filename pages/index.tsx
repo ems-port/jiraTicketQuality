@@ -771,9 +771,10 @@ export default function DashboardPage({
     if (!latestRow) {
       return null;
     }
-    const reference = latestRow.endedAt ?? latestRow.startedAt ?? null;
+    const finalRow: ConversationRow = latestRow;
+    const reference = finalRow.endedAt ?? finalRow.startedAt ?? null;
     return {
-      key: latestRow.issueKey,
+      key: finalRow.issueKey,
       dateLabel: formatShortDate(reference)
     };
   }, [sourceRows]);

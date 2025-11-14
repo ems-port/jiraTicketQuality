@@ -20,6 +20,16 @@ const ENTRIES: Entry[] = [
     ]
   },
   {
+    version: "822452b (build #16)",
+    title: "Supabase live refresh & default online mode",
+    date: "2025-11-14",
+    points: [
+      "Online DB mode is now the default data source and CSV uploads/sample loading stay disabled unless you opt out.",
+      "The new refresh job orchestrates Jira ingestion + GPT processing, streams status to the UI, and automatically reloads the dashboard when finished.",
+      "Fetch button/command center badges now communicate syncing state (amber) vs. healthy live data (green)."
+    ]
+  },
+  {
     version: "42d0f64",
     title: "Fix vercel Build",
     date: "2025-11-13",
