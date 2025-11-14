@@ -1,6 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { spawn } from "node:child_process";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { NextApiRequest, NextApiResponse } from "next";
 
 const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const INGEST_SCRIPT = "jiraPull/injestionJiraTickes.py";
@@ -35,7 +36,7 @@ const INITIAL_STATE: RefreshJobState = {
   lastCompletedAt: null
 };
 
-let jobState: RefreshJobState = { ...INITIAL_STATE };
+export let jobState: RefreshJobState = { ...INITIAL_STATE };
 let currentJob: Promise<void> | null = null;
 let supabaseClient: SupabaseClient | null = null;
 
@@ -199,6 +200,43 @@ async function runProcessor(totalHint: number | null): Promise<number> {
   return processed;
 }
 
+function isProductionHosted(): boolean {
+  return process.env.VERCEL === "1";
+}
+
+async function callPythonFunction(path: string, payload?: Record<string, unknown>) {
+  const url = `https://${process.env.VERCEL_URL}${path}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload ? JSON.stringify(payload) : undefined
+  });
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || `Failed to call ${path}`);
+  }
+  return response.json();
+}
+
+async function triggerRemoteIngest() {
+  await callPythonFunction("/api/ingest");
+  updateJobState({
+    fetchedTickets: undefined,
+    skippedTickets: undefined,
+    message: "Triggered remote ingestion"
+  });
+  return { fetched: 0, skipped: 0 };
+}
+
+async function triggerRemoteProcess(totalHint: number | null) {
+  await callPythonFunction("/api/process", totalHint ? { limit: totalHint } : undefined);
+  updateJobState({
+    processedTickets: undefined,
+    message: "Triggered remote processing"
+  });
+  return 0;
+}
+
 async function executeJob() {
   try {
     updateJobState({
@@ -214,7 +252,7 @@ async function executeJob() {
       error: undefined
     });
 
-    const ingestResult = await runIngestion();
+    const ingestResult = isProductionHosted() ? await triggerRemoteIngest() : await runIngestion();
 
     updateJobState({
       stage: "processing",
@@ -226,7 +264,7 @@ async function executeJob() {
       updateJobState({ totalToProcess: pending, message: pending > 0 ? `Processing ${pending} conversations...` : "Processing queue is empty." });
     }
 
-    const processed = await runProcessor(pending);
+    const processed = isProductionHosted() ? await triggerRemoteProcess(pending) : await runProcessor(pending);
 
     updateJobState({
       running: false,
@@ -252,7 +290,7 @@ async function executeJob() {
   }
 }
 
-function startJob() {
+export function startJob() {
   if (!currentJob) {
     currentJob = executeJob();
   }
@@ -266,6 +304,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   if (req.method === "POST") {
+    if (isProductionHosted()) {
+      res.status(501).json({ error: "Refresh job not available in this deployment." });
+      return;
+    }
     if (jobState.running) {
       res.status(409).json(jobState);
       return;

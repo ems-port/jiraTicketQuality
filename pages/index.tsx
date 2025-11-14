@@ -826,7 +826,7 @@ export default function DashboardPage({
                 <button
                   type="button"
                   onClick={handleFetchData}
-                  disabled={refreshState.running || !useOnlineData}
+                  disabled={refreshState.running || !useOnlineData || process.env.NEXT_PUBLIC_REFRESH_DISABLED === "1"}
                   className={clsx(
                     "flex items-center justify-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition",
                     !useOnlineData

@@ -80,6 +80,7 @@ Add the following variables to `.env` (or your deployment secret store):
 | `SUPABASE_SERVICE_ROLE_KEY` | Service-role key so we can upsert rows. |
 | `SUPABASE_DB_URL` | Optional Postgres connection string for automatic table creation. |
 | `SUPABASE_JIRA_PREPARED_TABLE` | Optional override for the prepared dataset table (default `jira_prepared_conversations`). |
+| `REFRESH_CRON_SECRET` | Optional shared secret checked by the `/api/cron/refresh` endpoint. |
 
 Install the Python dependencies and run:
 
@@ -124,6 +125,28 @@ fails, the script retries the conversation once and aborts after three
 consecutive failures to avoid silently skipping data. The processor runs with
 8 parallel threads by default and logs progress (`Processing progress:
 X/Y (Z%) [ISSUE]`) so you can surface it in the dashboard or a job monitor.
+
+## Scheduled refresh on Vercel
+
+The dashboard exposes `POST /api/refresh-data` for manual ingests and a cron-friendly
+`GET /api/cron/refresh` endpoint that starts the same job. Deployments can now ship
+with the following scheduling workflow:
+
+1. Set `REFRESH_CRON_SECRET` in the Vercel project (a random string). Requests to
+   `/api/cron/refresh` must include `Authorization: Bearer <secret>` or
+   `x-cron-secret: <secret>`; local testing can also pass `?token=<secret>`.
+2. Keep `vercel.json` committed so every deployment automatically registers a cron entry
+   that hits `/api/cron/refresh` every 30 minutes. Adjust the `schedule` field to any
+   valid Cron expression such as `"*/15 * * * *"` for a 15-minute cadence.
+3. In the Vercel dashboard, confirm that the cron job exists for the branch you need.
+   If you want to run against production, ensure the cron job is linked to the `production`
+   deployment. Cron jobs are available on all plans, but double-check on Hobby projects
+   whether the job targets preview or production—historically only preview deploys were
+   supported, so you may need to upgrade for production automation.
+
+When the cron invocation starts the job it returns immediately with the current job state.
+The serverless function streams Python logs to Vercel’s function logs, so failed runs can
+be debugged without re-deploying.
 
 ## Next steps
 

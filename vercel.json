@@ -1,0 +1,8 @@
+{
+  "cron": [
+    {
+      "path": "/api/cron/refresh",
+      "schedule": "*/30 * * * *"
+    }
+  ]
+}
