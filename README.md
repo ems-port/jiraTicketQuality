@@ -135,7 +135,7 @@ with the following scheduling workflow:
 1. Set `REFRESH_CRON_SECRET` in the Vercel project (a random string). Requests to
    `/api/cron/refresh` must include `Authorization: Bearer <secret>` or
    `x-cron-secret: <secret>`; local testing can also pass `?token=<secret>`.
-2. Keep `vercel.json` committed so every deployment automatically registers a cron entry
+2. Keep `vercel.cron.json` committed so every deployment automatically registers a cron entry
    that hits `/api/cron/refresh` every 30 minutes. Adjust the `schedule` field to any
    valid Cron expression such as `"*/15 * * * *"` for a 15-minute cadence.
 3. In the Vercel dashboard, confirm that the cron job exists for the branch you need.
