@@ -215,38 +215,110 @@ async function callPythonFunction(path: string, payload?: Record<string, unknown
   const host = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${process.env.PORT || 3000}`;
   const url = `${host}${path}`;
   console.info("[refresh] calling", url, payload || {});
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(process.env.REFRESH_CRON_SECRET
-        ? { Authorization: `Bearer ${process.env.REFRESH_CRON_SECRET}` }
-        : {})
-    },
-    body: payload ? JSON.stringify(payload) : undefined
-  });
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Failed to call ${path}`);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(process.env.REFRESH_CRON_SECRET
+          ? { Authorization: `Bearer ${process.env.REFRESH_CRON_SECRET}` }
+          : {})
+      },
+      body: payload ? JSON.stringify(payload) : undefined
+    });
+  } catch (error) {
+    console.error(`[refresh] ${path} network error`, error);
+    throw error;
   }
-  return response.json();
+
+  const rawBody = await response.text();
+  let data: Record<string, unknown> | null = null;
+  if (rawBody) {
+    try {
+      data = JSON.parse(rawBody) as Record<string, unknown>;
+    } catch (parseError) {
+      console.error(`[refresh] ${path} failed to parse JSON`, rawBody);
+      throw new Error(`Unable to parse ${path} response (status ${response.status}).`);
+    }
+  }
+
+  if (!response.ok) {
+    console.error(`[refresh] ${path} responded with ${response.status}`, data || rawBody);
+    const errorMessage = typeof data?.error === "string" ? data.error : `Failed to call ${path} (status ${response.status})`;
+    throw new Error(errorMessage);
+  }
+
+  console.info(`[refresh] ${path} success`, {
+    status: response.status,
+    hasStdout: Boolean((data as { stdout?: string })?.stdout),
+    hasStderr: Boolean((data as { stderr?: string })?.stderr)
+  });
+
+  return data;
+}
+
+function parseIngestionSummary(stdout?: string | null) {
+  if (!stdout) {
+    return null;
+  }
+  const regex = /Ingestion finished:\s+(\d+)\s+prepared payloads,\s+(\d+)\s+skipped duplicates/i;
+  const match = stdout.match(regex);
+  if (!match) {
+    return null;
+  }
+  return {
+    fetched: parseInt(match[1], 10),
+    skipped: parseInt(match[2], 10)
+  };
+}
+
+function parseProcessingSummary(stdout?: string | null) {
+  if (!stdout) {
+    return null;
+  }
+  const match = stdout.match(/Stored\s+(\d+)\s+processed conversations/i);
+  if (match) {
+    return parseInt(match[1], 10);
+  }
+  return null;
 }
 
 async function triggerRemoteIngest() {
-  await callPythonFunction("/api/ingest");
+  const result = (await callPythonFunction("/api/ingest")) as { stdout?: string | null } | null;
+  const summary = parseIngestionSummary(result?.stdout ?? null);
+  if (summary) {
+    updateJobState({
+      fetchedTickets: summary.fetched,
+      skippedTickets: summary.skipped,
+      message: `Fetched ${summary.fetched} new tickets${summary.skipped ? `, ${summary.skipped} skipped` : ""}.`
+    });
+    return summary;
+  }
   updateJobState({
     fetchedTickets: undefined,
     skippedTickets: undefined,
-    message: "Triggered remote ingestion"
+    message: "Triggered remote ingestion (check logs for details)."
   });
   return { fetched: 0, skipped: 0 };
 }
 
 async function triggerRemoteProcess(totalHint: number | null) {
-  await callPythonFunction("/api/process", totalHint ? { limit: totalHint } : undefined);
+  const result = (await callPythonFunction("/api/process", totalHint ? { limit: totalHint } : undefined)) as {
+    stdout?: string | null;
+  } | null;
+  const processed = parseProcessingSummary(result?.stdout ?? null);
+  if (typeof processed === "number") {
+    updateJobState({
+      processedTickets: processed,
+      message: `Remote processing stored ${processed} conversations.`
+    });
+    return processed;
+  }
   updateJobState({
     processedTickets: undefined,
-    message: "Triggered remote processing"
+    message: "Triggered remote processing (check logs for details)."
   });
   return 0;
 }

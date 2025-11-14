@@ -248,6 +248,16 @@ export default function DashboardPage({
     return () => clearInterval(interval);
   }, [fetchRefreshStatus]);
 
+  const surfaceRefreshError = useCallback((message: string) => {
+    setRefreshState((prev) => ({
+      ...prev,
+      running: false,
+      stage: "error",
+      error: message,
+      message
+    }));
+  }, []);
+
   const handleFetchData = useCallback(async () => {
     try {
       const response = await fetch(REFRESH_ENDPOINT, { method: "POST" });
@@ -255,14 +265,19 @@ export default function DashboardPage({
       if (response.status === 409 || response.status === 202) {
         setRefreshState(payload as RefreshJobState);
       } else if (!response.ok) {
-        console.error("Refresh request failed", payload);
+        const errorMessage =
+          ("error" in payload && typeof payload.error === "string" && payload.error) ||
+          `Refresh request failed (${response.status})`;
+        console.error("Refresh request failed", { status: response.status, payload });
+        surfaceRefreshError(errorMessage);
       }
     } catch (error) {
       console.error("Failed to trigger refresh", error);
+      surfaceRefreshError(error instanceof Error ? error.message : "Failed to trigger refresh");
     } finally {
       void fetchRefreshStatus();
     }
-  }, [fetchRefreshStatus]);
+  }, [fetchRefreshStatus, surfaceRefreshError]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -860,7 +875,9 @@ export default function DashboardPage({
                           : "idle"
                       }
                     />
-                    {refreshState.stage === "ingesting"
+                    {refreshState.stage === "error" && refreshState.error
+                      ? `Fetch failed · ${refreshState.error}`
+                      : refreshState.stage === "ingesting"
                       ? "Fetching latest Jira tickets…"
                       : refreshState.fetchedTickets != null
                       ? `Fetched ${refreshState.fetchedTickets} conversation${
@@ -870,7 +887,7 @@ export default function DashboardPage({
                             ? `, ${refreshState.skippedTickets} skipped`
                             : ""
                         }`
-                      : "Fetch ready"}
+                      : refreshState.message || "Fetch ready"}
                   </p>
                   <p className="flex items-center gap-2">
                     <StatusIcon
@@ -884,7 +901,9 @@ export default function DashboardPage({
                           : "idle"
                       }
                     />
-                    {refreshState.stage === "processing" && refreshState.totalToProcess ? (
+                    {refreshState.stage === "error" && refreshState.error ? (
+                      `Processing halted · ${refreshState.error}`
+                    ) : refreshState.stage === "processing" && refreshState.totalToProcess ? (
                       (() => {
                         const processed = refreshState.processedTickets ?? 0;
                         const total = refreshState.totalToProcess ?? 0;
@@ -899,7 +918,7 @@ export default function DashboardPage({
                     ) : refreshState.stage === "completed" ? (
                       `Processed ${refreshState.processedTickets ?? 0} conversations`
                     ) : (
-                      "Awaiting processing"
+                      refreshState.message || "Awaiting processing"
                     )}
                   </p>
                   {refreshState.stage === "completed" && refreshState.lastCompletedAt ? (
