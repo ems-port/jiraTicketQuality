@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { ChangeEvent } from "react";
 
 import { SettingsState } from "@/types";
@@ -7,9 +8,18 @@ type SettingsDrawerProps = {
   settings: SettingsState;
   onClose: () => void;
   onChange: (next: SettingsState) => void;
+  useOnlineData: boolean;
+  onToggleDataSource: (value: boolean) => void;
 };
 
-export function SettingsDrawer({ open, settings, onClose, onChange }: SettingsDrawerProps) {
+export function SettingsDrawer({
+  open,
+  settings,
+  onClose,
+  onChange,
+  useOnlineData,
+  onToggleDataSource
+}: SettingsDrawerProps) {
   if (!open) {
     return null;
   }
@@ -41,7 +51,34 @@ export function SettingsDrawer({ open, settings, onClose, onChange }: SettingsDr
             Close
           </button>
         </header>
+        <div className="flex items-center justify-between border-b border-slate-900/60 px-6 py-4 text-xs">
+          <p className="text-slate-400">Need to review recent updates?</p>
+          <Link
+            href="/changelog"
+            className="rounded-full border border-brand-500/60 px-3 py-1 text-[11px] font-semibold text-brand-100 transition hover:bg-brand-500/10"
+          >
+            View change log
+          </Link>
+        </div>
         <div className="space-y-6 px-6 py-6 text-sm text-slate-200">
+          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3">
+            <div>
+              <p className="text-sm font-semibold text-white">Data source</p>
+              <p className="text-xs text-slate-400">
+                Switch between local CSV uploads and the future online DB connector.
+              </p>
+            </div>
+            <label className="relative inline-flex cursor-pointer items-center">
+              <input
+                type="checkbox"
+                className="peer sr-only"
+                checked={useOnlineData}
+                onChange={(event) => onToggleDataSource(event.target.checked)}
+              />
+              <div className="h-6 w-10 rounded-full bg-slate-700 transition peer-checked:bg-amber-500" />
+              <div className="absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition peer-checked:translate-x-4" />
+            </label>
+          </div>
           <SettingField
             label="Toxicity threshold"
             description="Flag any mean toxicity score above this threshold."

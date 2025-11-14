@@ -16,6 +16,8 @@ ARTIFACT_PATH = Path("tests/artifacts/reasoning_schema_snapshot.jsonl")
 class ReasoningSchemaTestCase(unittest.TestCase):
   def test_first_twenty_tickets_emit_reasoning_fields(self) -> None:
     dataset_path = Path("data/jira_clean_nov.jsonl")
+    if not dataset_path.exists():
+      self.skipTest("Fixture data/jira_clean_nov.jsonl not available in this environment.")
     records = list(load_jsonl(dataset_path, limit=20))
     self.assertEqual(len(records), 20, "Fixture must provide 20 conversations for the regression test.")
 

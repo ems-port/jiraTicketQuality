@@ -21,6 +21,8 @@ type CommandCenterPanelProps = {
   onAgentSave: (agentId: string, payload: { displayName: string; role: AgentRole }) => void;
   agentSaveState: Record<string, AgentSaveState>;
   agentDirectoryError: string | null;
+  usingOnlineData: boolean;
+  refreshStage: "idle" | "ingesting" | "processing" | "completed" | "error";
 };
 
 const ROLE_VALUES: AgentRole[] = ["TIER1", "TIER2", "NON_AGENT"];
@@ -45,7 +47,9 @@ export function CommandCenterPanel({
   agentEntries,
   onAgentSave,
   agentSaveState,
-  agentDirectoryError
+  agentDirectoryError,
+  usingOnlineData,
+  refreshStage
 }: CommandCenterPanelProps) {
   const conversationInputRef = useRef<HTMLInputElement | null>(null);
   const customerInputRef = useRef<HTMLInputElement | null>(null);
@@ -104,24 +108,35 @@ export function CommandCenterPanel({
             {conversationCount.toLocaleString()} rows
           </span>
         </div>
-        <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-brand-500/50 bg-brand-500/20 px-4 py-2 text-sm font-semibold text-brand-100 transition hover:bg-brand-500/40">
+        <label
+          className={clsx(
+            "flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition",
+           usingOnlineData
+              ? "cursor-not-allowed border border-emerald-500/50 bg-emerald-500/10 text-emerald-200"
+              : "cursor-pointer border border-brand-500/50 bg-brand-500/20 text-brand-100 hover:bg-brand-500/40"
+          )}
+        >
           <input
             ref={conversationInputRef}
             type="file"
             accept=".csv"
             className="hidden"
             onChange={handleConversationChange}
+            disabled={usingOnlineData}
           />
-          Upload CSV
+          {usingOnlineData ? "Online DB" : "Upload CSV"}
         </label>
         <button
           type="button"
           onClick={() => {
             void onLoadSampleData();
           }}
+          disabled={usingOnlineData}
           className={clsx(
             "rounded-xl px-4 py-2 text-sm font-semibold transition",
-            sampleDataActive
+            usingOnlineData
+              ? "cursor-not-allowed border border-slate-800 text-slate-500"
+              : sampleDataActive
               ? "border border-emerald-500/60 bg-emerald-500/20 text-emerald-200"
               : "border border-slate-700 text-slate-200 hover:border-brand-500 hover:text-brand-200"
           )}
@@ -135,6 +150,18 @@ export function CommandCenterPanel({
             </span>
           )}
           <p>Default dataset: data/convo_quality_Nov_5-mini.csv</p>
+          {usingOnlineData && (
+            <span
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-full px-3 py-1 font-semibold",
+                refreshStage === "ingesting" || refreshStage === "processing"
+                  ? "border border-amber-400/50 bg-amber-400/10 text-amber-200"
+                  : "border border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
+              )}
+            >
+              {refreshStage === "ingesting" || refreshStage === "processing" ? "● Online DB syncing" : "● Online DB active"}
+            </span>
+          )}
           {fileName && (
             <p className="truncate">
               Loaded file: <span className="text-slate-200">{fileName}</span>

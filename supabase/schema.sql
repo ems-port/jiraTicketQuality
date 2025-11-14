@@ -1,0 +1,70 @@
+drop table if exists public.jira_processed_conversations cascade;
+drop table if exists public.jira_prepared_conversations cascade;
+drop table if exists public.jira_ingest_raw cascade;
+
+create table if not exists public.jira_prepared_conversations (
+    issue_key text primary key,
+    payload jsonb not null,
+    merge_context_size_tokens integer,
+    dataset_version text not null default 'v1',
+    prepared_at timestamptz not null default timezone('utc', now()),
+    processed boolean not null default false
+);
+
+alter table if exists public.jira_prepared_conversations
+    add column if not exists processed boolean not null default false;
+
+create index if not exists idx_jira_prepared_created
+    on public.jira_prepared_conversations ((payload ->> 'created'));
+create index if not exists idx_jira_prepared_processed
+    on public.jira_prepared_conversations (processed, prepared_at);
+
+create table if not exists public.jira_processed_conversations (
+    issue_key text primary key,
+    status text,
+    resolution text,
+    custom_field_hub text,
+    conversation_start timestamptz,
+    conversation_end timestamptz,
+    duration_minutes double precision,
+    duration_to_resolution double precision,
+    first_agent_response_minutes double precision,
+    avg_agent_response_minutes double precision,
+    avg_customer_response_minutes double precision,
+    messages_total integer,
+    messages_agent integer,
+    messages_customer integer,
+    turns integer,
+    agent_authors text,
+    customer_authors text,
+    initial_response_sla_5m boolean,
+    initial_response_sla_15m boolean,
+    agent_profanity_detected boolean,
+    agent_profanity_count integer,
+    customer_abuse_detected boolean,
+    customer_abuse_count integer,
+    llm_summary_250 text,
+    conversation_rating text,
+    problem_extract text,
+    resolution_extract text,
+    steps_extract jsonb,
+    resolution_timestamp_iso timestamptz,
+    resolution_message_index integer,
+    contact_reason text,
+    contact_reason_original text,
+    contact_reason_change boolean,
+    reason_override_why text,
+    resolution_why text,
+    customer_sentiment_primary text,
+    customer_sentiment_scores jsonb,
+    agent_score double precision,
+    customer_score double precision,
+    resolved boolean,
+    is_resolved boolean,
+    improvement_tip text,
+    llm_model text,
+    llm_input_tokens integer,
+    llm_output_tokens integer,
+    llm_cost_usd double precision,
+    processed_at timestamptz not null default timezone('utc', now())
+);

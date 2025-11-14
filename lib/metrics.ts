@@ -722,7 +722,10 @@ export function computeAgentMatrix(
       avgAgentScore:
         data.agentScoreCount > 0 ? data.agentScoreTotal / data.agentScoreCount : null,
       escalatedCount: data.escalatedCount,
-      misclassifiedCount: data.misclassifiedCount
+      misclassifiedCount: data.misclassifiedCount,
+      misclassifiedPercent:
+        data.totalCount > 0 ? data.misclassifiedCount / data.totalCount : null,
+      ticketCount: data.totalCount
     }))
     .sort((a, b) => a.agent.localeCompare(b.agent));
 }

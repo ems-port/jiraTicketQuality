@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 import type { GetStaticProps } from "next";
+import clsx from "clsx";
 
 import { AgentMatrixHeatmap } from "@/components/AgentMatrixHeatmap";
 import { AgentRankList } from "@/components/AgentRankList";
@@ -63,11 +64,37 @@ const WINDOW_LABELS: Record<TimeWindow, string> = {
 const ROLE_FILTERS: AgentRole[] = ["TIER1", "TIER2", "NON_AGENT"];
 const SAMPLE_DATA_ENDPOINT = "/api/sample-data";
 const ROLE_DATA_ENDPOINT = "/api/roles";
+const REFRESH_ENDPOINT = "/api/refresh-data";
 
 const DEFAULT_SETTINGS: SettingsState = {
   toxicity_threshold: 0.8,
   abusive_caps_trigger: 5,
   min_msgs_for_toxicity: 3
+};
+
+type RefreshJobStage = "idle" | "ingesting" | "processing" | "completed" | "error";
+
+type RefreshJobState = {
+  running: boolean;
+  stage: RefreshJobStage;
+  startedAt: number | null;
+  updatedAt: number | null;
+  message?: string;
+  fetchedTickets?: number;
+  skippedTickets?: number;
+  processedTickets?: number;
+  totalToProcess?: number;
+  etaSeconds?: number;
+  lastCompletedAt?: number | null;
+  error?: string;
+};
+
+const DEFAULT_REFRESH_STATE: RefreshJobState = {
+  running: false,
+  stage: "idle",
+  startedAt: null,
+  updatedAt: null,
+  lastCompletedAt: null
 };
 
 type DrilldownState = {
@@ -79,6 +106,7 @@ export default function DashboardPage({
   initialAgentDirectory = {},
   initialAgentOrder = []
 }: DashboardPageProps) {
+  const buildNumber = process.env.NEXT_PUBLIC_BUILD_NUMBER ?? "dev";
   const rows = useDashboardStore((state) => state.rows);
   const setRows = useDashboardStore((state) => state.setRows);
   const sampleDataActive = useDashboardStore((state) => state.sampleDataActive);
@@ -109,8 +137,11 @@ export default function DashboardPage({
   const [fileName, setFileName] = useState<string | null>(null);
   const [tipsDrilldownOpen, setTipsDrilldownOpen] = useState(false);
   const [isManagerReviewOpen, setIsManagerReviewOpen] = useState(false);
+  const [useOnlineData, setUseOnlineData] = useState(true);
+  const [refreshState, setRefreshState] = useState<RefreshJobState>(DEFAULT_REFRESH_STATE);
   const initialLoadAttemptedRef = useRef(false);
   const initialRoleLoadAttemptedRef = useRef(false);
+  const lastRefreshCompletionRef = useRef<number | null>(null);
 
   useEffect(() => {
     setIdMapping({});
@@ -151,12 +182,100 @@ export default function DashboardPage({
     }
   }, [setRows, setFileError, setFileName]);
 
+  const loadOnlineData = useCallback(async () => {
+    setFileError(null);
+    try {
+      const response = await fetch("/api/conversations");
+      if (!response.ok) {
+        throw new Error(`Failed to load online data (${response.status})`);
+      }
+      const payload = await response.json();
+      const rawRows: Record<string, unknown>[] = payload.rows ?? [];
+      const normalised = normaliseRows(rawRows as Record<string, string | number | boolean | null>[]);
+      if (!normalised.length) {
+        setFileError("Online data source returned no conversations.");
+        return;
+      }
+      setRows(normalised, { sampleData: false });
+      setFileName("Supabase Live DB");
+    } catch (error) {
+      setFileError((error as Error).message ?? "Unable to load online data.");
+    }
+  }, [setRows, setFileError, setFileName]);
+
   useEffect(() => {
-    if (!rows.length && !initialLoadAttemptedRef.current) {
+    if (!rows.length && !initialLoadAttemptedRef.current && !useOnlineData) {
       initialLoadAttemptedRef.current = true;
       void loadSampleData();
     }
-  }, [rows.length, loadSampleData]);
+  }, [rows.length, loadSampleData, useOnlineData]);
+
+  useEffect(() => {
+    if (useOnlineData) {
+      void loadOnlineData();
+    }
+  }, [useOnlineData, loadOnlineData]);
+
+  const fetchRefreshStatus = useCallback(async () => {
+    try {
+      const response = await fetch(REFRESH_ENDPOINT);
+      if (!response.ok) {
+        return;
+      }
+      const payload = (await response.json()) as RefreshJobState;
+      setRefreshState(payload);
+      if (
+        payload.lastCompletedAt &&
+        payload.lastCompletedAt !== lastRefreshCompletionRef.current &&
+        typeof window !== "undefined"
+      ) {
+        lastRefreshCompletionRef.current = payload.lastCompletedAt;
+        window.localStorage.setItem("cq_last_fetch_at", new Date(payload.lastCompletedAt).toISOString());
+        if (useOnlineData) {
+          void loadOnlineData();
+        }
+      }
+    } catch (error) {
+      console.error("Failed to fetch refresh status", error);
+    }
+  }, [loadOnlineData, useOnlineData]);
+
+  useEffect(() => {
+    void fetchRefreshStatus();
+    const interval = setInterval(() => {
+      void fetchRefreshStatus();
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [fetchRefreshStatus]);
+
+  const handleFetchData = useCallback(async () => {
+    try {
+      const response = await fetch(REFRESH_ENDPOINT, { method: "POST" });
+      const payload = (await response.json()) as RefreshJobState | { error: string };
+      if (response.status === 409 || response.status === 202) {
+        setRefreshState(payload as RefreshJobState);
+      } else if (!response.ok) {
+        console.error("Refresh request failed", payload);
+      }
+    } catch (error) {
+      console.error("Failed to trigger refresh", error);
+    } finally {
+      void fetchRefreshStatus();
+    }
+  }, [fetchRefreshStatus]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const stored = window.localStorage.getItem("cq_last_fetch_at");
+    if (stored) {
+      const parsed = new Date(stored);
+      if (!Number.isNaN(parsed.getTime())) {
+        lastRefreshCompletionRef.current = parsed.getTime();
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (initialRoleLoadAttemptedRef.current) {
@@ -632,6 +751,36 @@ export default function DashboardPage({
   );
 
   const conversationCount = filteredRows.length;
+  const latestTicket = useMemo(() => {
+    if (!sourceRows.length) {
+      return null;
+    }
+    let latestRow: ConversationRow | null = null;
+    let latestTime = 0;
+    sourceRows.forEach((row) => {
+      const reference = row.endedAt ?? row.startedAt;
+      if (!reference) {
+        return;
+      }
+      const time = reference.getTime();
+      if (!latestRow || time > latestTime) {
+        latestRow = row;
+        latestTime = time;
+      }
+    });
+    if (!latestRow) {
+      return null;
+    }
+    const reference = latestRow.endedAt ?? latestRow.startedAt ?? null;
+    return {
+      key: latestRow.issueKey,
+      dateLabel: formatShortDate(reference)
+    };
+  }, [sourceRows]);
+
+  const lastRefreshTimestamp = refreshState.lastCompletedAt ?? lastRefreshCompletionRef.current ?? null;
+  const needsDataRefresh =
+    !refreshState.running && (!lastRefreshTimestamp || Date.now() - lastRefreshTimestamp > 15 * 60 * 1000);
   const unresolvedFooterText = selectedResolvedStats.total
     ? `${unresolvedCount.toLocaleString()} of ${selectedResolvedStats.total.toLocaleString()} not resolved`
     : "No tickets in this window";
@@ -639,38 +788,142 @@ export default function DashboardPage({
   return (
     <main className="min-h-screen bg-slate-950 pb-16">
       <div className="mx-auto flex w-full max-w-screen-2xl flex-col gap-6 px-6 py-10">
-        <header className="flex flex-col gap-4 rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900/80 to-slate-950/60 p-6 shadow-xl">
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+        <header className="flex flex-col gap-4 rounded-3xl border border-amber-500/40 bg-gradient-to-br from-amber-500/10 via-slate-900/70 to-slate-950/60 p-6 shadow-xl">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-2">
-              <h1 className="text-3xl font-bold text-white">Conversation Quality Command Center</h1>
-              <p className="text-sm text-slate-300">
+              <div className="flex flex-wrap items-center gap-3">
+                <h1 className="text-3xl font-bold text-white">Conversation Quality Command Center</h1>
+                <span className="rounded-full border border-amber-400/40 bg-amber-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-amber-200">
+                  Early Alpha
+                </span>
+              </div>
+              <p className="text-sm text-slate-200">
                 Monitor Jira LLM-assisted conversations with real-time scoring, escalation trends, and toxicity alerts.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setIsManagerReviewOpen(true)}
-                className="rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
-              >
-                Manager review
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsSettingsOpen(true)}
-                className="rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
-              >
-                Settings
-              </button>
+            <div className="flex flex-col items-end gap-3 text-right">
+              <span className="text-xs font-semibold uppercase tracking-wide text-amber-300">
+                Build #{buildNumber}
+              </span>
+              <div className="flex flex-col items-end gap-2">
+                <div className="flex flex-wrap justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsManagerReviewOpen(true)}
+                    className="rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
+                  >
+                    Manager review
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsSettingsOpen(true)}
+                    className="rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
+                  >
+                    Settings
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleFetchData}
+                  disabled={refreshState.running || !useOnlineData}
+                  className={clsx(
+                    "flex items-center justify-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition",
+                    !useOnlineData
+                      ? "cursor-not-allowed border-slate-800 text-slate-500"
+                      : refreshState.running
+                      ? "cursor-not-allowed border-slate-700 text-slate-500"
+                      : needsDataRefresh
+                      ? "border-amber-400 text-amber-200 hover:bg-amber-500/10"
+                      : "border-slate-700 text-slate-200 hover:border-brand-500 hover:text-brand-200"
+                  )}
+                >
+                  {refreshState.running && (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  )}
+                  {!useOnlineData
+                    ? "Switch to Online DB"
+                    : refreshState.running
+                    ? "Refreshing…"
+                    : "Fetch data"}
+                </button>
+                <div className="space-y-1 text-xs text-slate-400">
+                  <p className="flex items-center gap-2">
+                    <StatusIcon
+                      state={
+                        refreshState.stage === "completed" || refreshState.stage === "processing"
+                          ? "done"
+                          : refreshState.stage === "ingesting"
+                          ? "running"
+                          : refreshState.error
+                          ? "error"
+                          : "idle"
+                      }
+                    />
+                    {refreshState.stage === "ingesting"
+                      ? "Fetching latest Jira tickets…"
+                      : refreshState.fetchedTickets != null
+                      ? `Fetched ${refreshState.fetchedTickets} conversation${
+                          refreshState.fetchedTickets === 1 ? "" : "s"
+                        }${
+                          refreshState.skippedTickets
+                            ? `, ${refreshState.skippedTickets} skipped`
+                            : ""
+                        }`
+                      : "Fetch ready"}
+                  </p>
+                  <p className="flex items-center gap-2">
+                    <StatusIcon
+                      state={
+                        refreshState.stage === "processing"
+                          ? "running"
+                          : refreshState.stage === "completed"
+                          ? "done"
+                          : refreshState.error
+                          ? "error"
+                          : "idle"
+                      }
+                    />
+                    {refreshState.stage === "processing" && refreshState.totalToProcess ? (
+                      (() => {
+                        const processed = refreshState.processedTickets ?? 0;
+                        const total = refreshState.totalToProcess ?? 0;
+                        const percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+                        return (
+                          <>
+                            {`GPT processing ${percent}% (${processed}/${total})`}
+                            {refreshState.etaSeconds ? ` · ${formatEta(refreshState.etaSeconds)}` : ""}
+                          </>
+                        );
+                      })()
+                    ) : refreshState.stage === "completed" ? (
+                      `Processed ${refreshState.processedTickets ?? 0} conversations`
+                    ) : (
+                      "Awaiting processing"
+                    )}
+                  </p>
+                  {refreshState.stage === "completed" && refreshState.lastCompletedAt ? (
+                    <p>{`Updated ${formatRelativeTime(refreshState.lastCompletedAt)}.`}</p>
+                  ) : null}
+                  {refreshState.stage === "error" && refreshState.error && (
+                    <p className="text-red-300">{refreshState.error}</p>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-200">
             <span className="rounded-full border border-brand-500/40 bg-brand-500/15 px-3 py-1 text-brand-100">
               {conversationCount.toLocaleString()} conversations in view
             </span>
             {fileName && (
-              <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
+              <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-200">
                 Active dataset: {fileName}
+              </span>
+            )}
+            {latestTicket && (
+              <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-200">
+                Latest: {latestTicket.key}
+                {latestTicket.dateLabel ? ` · ${latestTicket.dateLabel}` : ""}
               </span>
             )}
           </div>
@@ -880,6 +1133,8 @@ export default function DashboardPage({
             onAgentSave={handleAgentSave}
             agentSaveState={agentSaveState}
             agentDirectoryError={agentDirectoryError}
+            usingOnlineData={useOnlineData}
+            refreshStage={refreshState.stage}
           />
         </div>
       </div>
@@ -912,6 +1167,8 @@ export default function DashboardPage({
         settings={settings}
         onClose={() => setIsSettingsOpen(false)}
         onChange={setSettings}
+        useOnlineData={useOnlineData}
+        onToggleDataSource={setUseOnlineData}
       />
       <ManagerReviewPanel
         open={isManagerReviewOpen}
@@ -942,6 +1199,69 @@ function formatDurationValue(value: number | null): string {
     return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
   }
   return `${value.toFixed(1)}m`;
+}
+
+function formatShortDate(date: Date | null): string | null {
+  if (!date) {
+    return null;
+  }
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function formatEta(seconds: number): string {
+  if (seconds <= 0) {
+    return "finishing up";
+  }
+  if (seconds < 60) {
+    return `${Math.max(1, Math.round(seconds))}s remaining`;
+  }
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return `${minutes}m remaining`;
+}
+
+function formatRelativeTime(timestamp: number): string {
+  const diff = Date.now() - timestamp;
+  if (diff < 60_000) {
+    return "just now";
+  }
+  if (diff < 3_600_000) {
+    const minutes = Math.round(diff / 60_000);
+    return `${minutes}m ago`;
+  }
+  if (diff < 86_400_000) {
+    const hours = Math.round(diff / 3_600_000);
+    return `${hours}h ago`;
+  }
+  const days = Math.round(diff / 86_400_000);
+  return `${days}d ago`;
+}
+
+function StatusIcon({ state }: { state: "running" | "done" | "error" | "idle" }) {
+  if (state === "running") {
+    return (
+      <span className="inline-flex h-3 w-3 animate-spin rounded-full border border-current border-t-transparent text-amber-300" />
+    );
+  }
+  if (state === "done") {
+    return (
+      <span className="inline-flex h-3 w-3 items-center justify-center rounded-full bg-emerald-400 text-[8px] text-slate-900">
+        ✓
+      </span>
+    );
+  }
+  if (state === "error") {
+    return (
+      <span className="inline-flex h-3 w-3 items-center justify-center rounded-full bg-red-400 text-[8px] text-slate-900">
+        !
+      </span>
+    );
+  }
+  return <span className="inline-flex h-3 w-3 rounded-full border border-slate-600" />;
 }
 
 export const getStaticProps: GetStaticProps<DashboardPageProps> = async () => {

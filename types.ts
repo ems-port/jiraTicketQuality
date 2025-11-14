@@ -116,6 +116,8 @@ export interface AgentMatrixRow {
   avgAgentScore: number | null;
   escalatedCount: number;
   misclassifiedCount: number;
+  misclassifiedPercent: number | null;
+  ticketCount: number;
 }
 
 export interface EscalationSeriesEntry {

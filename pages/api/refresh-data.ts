@@ -1,0 +1,284 @@
+import type { NextApiRequest, NextApiResponse } from "next";
+import { spawn } from "node:child_process";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+
+const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
+const INGEST_SCRIPT = "jiraPull/injestionJiraTickes.py";
+const PROCESS_SCRIPT = "jiraPull/process_conversations.py";
+const PREPARED_TABLE = process.env.SUPABASE_JIRA_PREPARED_TABLE || "jira_prepared_conversations";
+
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+export type RefreshJobStage = "idle" | "ingesting" | "processing" | "completed" | "error";
+
+export type RefreshJobState = {
+  running: boolean;
+  stage: RefreshJobStage;
+  startedAt: number | null;
+  updatedAt: number | null;
+  message?: string;
+  fetchedTickets?: number;
+  skippedTickets?: number;
+  processedTickets?: number;
+  totalToProcess?: number;
+  etaSeconds?: number;
+  lastCompletedAt?: number | null;
+  error?: string;
+};
+
+const INITIAL_STATE: RefreshJobState = {
+  running: false,
+  stage: "idle",
+  startedAt: null,
+  updatedAt: null,
+  lastCompletedAt: null
+};
+
+let jobState: RefreshJobState = { ...INITIAL_STATE };
+let currentJob: Promise<void> | null = null;
+let supabaseClient: SupabaseClient | null = null;
+
+if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+  supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, detectSessionInUrl: false }
+  });
+}
+
+function updateJobState(patch: Partial<RefreshJobState>) {
+  jobState = {
+    ...jobState,
+    ...patch,
+    updatedAt: Date.now()
+  };
+}
+
+function parseLines(buffer: string, handler: (line: string) => void) {
+  buffer
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .forEach(handler);
+}
+
+function runPythonScript(args: string[], onLine?: (line: string) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(PYTHON_BIN, args, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1"
+      }
+    });
+
+    let stderrBuffer = "";
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      parseLines(text, (line) => {
+        console.log(`[${args[0]}] ${line}`);
+        if (onLine) {
+          onLine(line);
+        }
+      });
+    });
+
+    proc.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderrBuffer += text;
+      parseLines(text, (line) => {
+        console.error(`[${args[0]}][stderr] ${line}`);
+        if (onLine) {
+          onLine(line);
+        }
+      });
+    });
+
+    proc.on("error", (error) => {
+      reject(error);
+    });
+
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(stderrBuffer || `Python script exited with code ${code}`));
+      }
+    });
+  });
+}
+
+async function countPendingConversations(): Promise<number | null> {
+  if (!supabaseClient) {
+    return null;
+  }
+  try {
+    const { count, error } = await supabaseClient
+      .from(PREPARED_TABLE)
+      .select("issue_key", { count: "exact", head: true })
+      .eq("processed", false);
+    if (error) {
+      throw error;
+    }
+    return count ?? 0;
+  } catch (error) {
+    console.error("Failed to count pending conversations", error);
+    return null;
+  }
+}
+
+async function runIngestion(): Promise<{ fetched: number; skipped: number }> {
+  let fetched = 0;
+  let skipped = 0;
+  await runPythonScript([INGEST_SCRIPT], (line) => {
+    if (line.includes("Ingestion finished:")) {
+      const match = line.match(/Ingestion finished:\s+(\d+)\s+prepared payloads,\s+(\d+)\s+skipped duplicates/i);
+      if (match) {
+        fetched = parseInt(match[1], 10);
+        skipped = parseInt(match[2], 10);
+        updateJobState({
+          fetchedTickets: fetched,
+          skippedTickets: skipped,
+          message: `Fetched ${fetched} new tickets${skipped ? `, ${skipped} skipped` : ""}.`
+        });
+      }
+    }
+  });
+  return { fetched, skipped };
+}
+
+async function runProcessor(totalHint: number | null): Promise<number> {
+  let processed = 0;
+  let total = typeof totalHint === "number" && totalHint > 0 ? totalHint : null;
+  const processingStartedAt = Date.now();
+  const limit = Math.max(1, total ?? 50);
+  await runPythonScript([PROCESS_SCRIPT, "--limit", String(limit)], (line) => {
+    const progressMatch = line.match(/Processing progress:\s*(\d+)\/(\d+)/i);
+    if (progressMatch) {
+      processed = parseInt(progressMatch[1], 10);
+      total = parseInt(progressMatch[2], 10) || total;
+    } else if (line.startsWith("Processing ")) {
+      processed += 1;
+    }
+
+    if (progressMatch || line.startsWith("Processing ")) {
+      const etaSeconds = total && processed > 0
+        ? Math.max(0, Math.round(((Date.now() - processingStartedAt) / processed / 1000) * (total - processed)))
+        : undefined;
+      updateJobState({
+        processedTickets: processed,
+        totalToProcess: total ?? undefined,
+        etaSeconds,
+        message: total
+          ? `Processing ${processed}/${total} conversations...`
+          : `Processing ${processed} conversations...`
+      });
+      return;
+    }
+
+    if (line.includes("Stored ") && line.includes("processed conversations")) {
+      const match = line.match(/Stored\s+(\d+)\s+processed conversations/i);
+      if (match) {
+        processed = parseInt(match[1], 10);
+        updateJobState({
+          processedTickets: processed,
+          etaSeconds: undefined,
+          message: `Stored ${processed} processed conversations.`
+        });
+      }
+    } else if (line.includes("No new conversations to process")) {
+      processed = 0;
+      updateJobState({
+        processedTickets: 0,
+        etaSeconds: undefined,
+        message: "No new conversations to process.",
+        totalToProcess: 0
+      });
+    }
+  });
+  return processed;
+}
+
+async function executeJob() {
+  try {
+    updateJobState({
+      running: true,
+      stage: "ingesting",
+      startedAt: Date.now(),
+      message: "Fetching the latest Jira tickets...",
+      fetchedTickets: undefined,
+      skippedTickets: undefined,
+      processedTickets: undefined,
+      totalToProcess: undefined,
+      etaSeconds: undefined,
+      error: undefined
+    });
+
+    const ingestResult = await runIngestion();
+
+    updateJobState({
+      stage: "processing",
+      message: "Processing conversations..."
+    });
+
+    const pending = await countPendingConversations();
+    if (pending !== null) {
+      updateJobState({ totalToProcess: pending, message: pending > 0 ? `Processing ${pending} conversations...` : "Processing queue is empty." });
+    }
+
+    const processed = await runProcessor(pending);
+
+    updateJobState({
+      running: false,
+      stage: "completed",
+      processedTickets: processed,
+      message:
+        ingestResult.fetched || processed
+          ? `Fetched ${ingestResult.fetched} new tickets · Processed ${processed} conversations.`
+          : "Refresh completed (no new data)",
+      etaSeconds: undefined,
+      lastCompletedAt: Date.now()
+    });
+  } catch (error) {
+    console.error("Refresh job failed", error);
+    updateJobState({
+      running: false,
+      stage: "error",
+      error: (error as Error).message ?? "Refresh failed",
+      message: "Refresh failed"
+    });
+  } finally {
+    currentJob = null;
+  }
+}
+
+function startJob() {
+  if (!currentJob) {
+    currentJob = executeJob();
+  }
+  return currentJob;
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method === "GET") {
+    res.status(200).json(jobState);
+    return;
+  }
+
+  if (req.method === "POST") {
+    if (jobState.running) {
+      res.status(409).json(jobState);
+      return;
+    }
+    if (!SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_URL) {
+      res.status(500).json({ error: "Supabase credentials missing" });
+      return;
+    }
+    startJob();
+    res.status(202).json(jobState);
+    return;
+  }
+
+  res.setHeader("Allow", "GET, POST");
+  res.status(405).json({ error: "Method not allowed" });
+}

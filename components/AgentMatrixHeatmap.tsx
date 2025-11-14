@@ -12,7 +12,8 @@ type SortKey =
   | "avgResolutionDurationMinutes"
   | "resolvedRate"
   | "escalatedCount"
-  | "misclassifiedCount";
+  | "misclassifiedCount"
+  | "ticketCount";
 type SortDirection = "asc" | "desc";
 
 type AgentMatrixHeatmapProps = {
@@ -136,6 +137,7 @@ export function AgentMatrixHeatmap({
                 <td className="px-4 py-3" style={{ background: heatmap(row.avgFirstResponseMinutes, maxFirst, true) }}>
                   {formatNumber(row.avgFirstResponseMinutes)}
                 </td>
+                <td className="px-4 py-3 text-slate-200">{row.ticketCount}</td>
                 <td className="px-4 py-3" style={{ background: heatmap(row.avgAgentResponseMinutes, maxAvg, true) }}>
                   {formatNumber(row.avgAgentResponseMinutes)}
                 </td>
@@ -156,12 +158,12 @@ export function AgentMatrixHeatmap({
                     <button
                       type="button"
                       onClick={() => onSelectMisclassified(row.agent)}
-                      className="rounded-full border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-sm font-semibold text-amber-100 transition hover:bg-amber-500/30"
+                      className="rounded-full border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-100 transition hover:bg-amber-500/30"
                     >
-                      {row.misclassifiedCount}
+                      {formatPercent(row.misclassifiedPercent)}
                     </button>
                   ) : (
-                    row.misclassifiedCount
+                    formatPercent(row.misclassifiedPercent)
                   )}
                 </td>
               </tr>
@@ -248,7 +250,8 @@ function columns(metric: EscalationMetricKind) {
       key: "escalatedCount",
       label: metric === "tier" ? "Escalation T1→T2" : "Handovers T1→Any"
     },
-    { key: "misclassifiedCount", label: "Misclassified" }
+    { key: "misclassifiedCount", label: "Misclassified %" },
+    { key: "ticketCount", label: "Tickets" }
   ] as const;
 }
 
@@ -269,7 +272,9 @@ function getSortValue(row: AgentMatrixRow, key: SortKey): number | string | null
     case "escalatedCount":
       return row.escalatedCount;
     case "misclassifiedCount":
-      return row.misclassifiedCount;
+      return row.misclassifiedPercent ?? 0;
+    case "ticketCount":
+      return row.ticketCount;
     default:
       return null;
   }
