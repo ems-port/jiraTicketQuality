@@ -51,6 +51,14 @@ function updateJobState(patch: Partial<RefreshJobState>) {
     ...patch,
     updatedAt: Date.now()
   };
+  console.info("[refresh] state update:", {
+    stage: jobState.stage,
+    message: jobState.message,
+    fetched: jobState.fetchedTickets,
+    processed: jobState.processedTickets,
+    total: jobState.totalToProcess,
+    running: jobState.running
+  });
 }
 
 function parseLines(buffer: string, handler: (line: string) => void) {
@@ -204,7 +212,9 @@ function isProductionHosted(): boolean {
 }
 
 async function callPythonFunction(path: string, payload?: Record<string, unknown>) {
-  const url = `https://${process.env.VERCEL_URL}${path}`;
+  const host = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${process.env.PORT || 3000}`;
+  const url = `${host}${path}`;
+  console.info("[refresh] calling", url, payload || {});
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -303,10 +313,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   if (req.method === "POST") {
-    if (isProductionHosted()) {
-      res.status(501).json({ error: "Refresh job not available in this deployment." });
-      return;
-    }
     if (jobState.running) {
       res.status(409).json(jobState);
       return;
