@@ -2,15 +2,49 @@
 const path = require("node:path");
 const { execSync } = require("node:child_process");
 
-function computeGitBuildNumber() {
+function isGitAvailable() {
   try {
-    if (process.env.VERCEL === "1") {
-      try {
-        execSync("git fetch --unshallow", { stdio: "ignore" });
-      } catch (error) {
-        // Ignore fetch failures (already have full history or network blocked)
-      }
+    execSync("git rev-parse --is-inside-work-tree", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureFullHistory() {
+  if (process.env.VERCEL !== "1") {
+    return;
+  }
+  try {
+    const isShallow = execSync("git rev-parse --is-shallow-repository").toString().trim() === "true";
+    if (!isShallow) {
+      return;
     }
+    const branch =
+      process.env.VERCEL_GIT_COMMIT_REF ||
+      execSync("git rev-parse --abbrev-ref HEAD").toString().trim() ||
+      "main";
+    try {
+      execSync(`git fetch origin ${branch} --depth=2147483647`, { stdio: "ignore" });
+    } catch {
+      // ignore fetch failures for branch-specific fetch
+    }
+    try {
+      execSync("git fetch --unshallow", { stdio: "ignore" });
+    } catch {
+      // ignore if repository is already fully cloned or fetch not allowed
+    }
+  } catch {
+    // ignore inability to detect shallow repo
+  }
+}
+
+function computeGitBuildNumber() {
+  if (!isGitAvailable()) {
+    return null;
+  }
+  try {
+    ensureFullHistory();
     return execSync("git rev-list --count HEAD").toString().trim();
   } catch {
     return null;
