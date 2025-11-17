@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=200, help="Max number of conversations to process.")
     parser.add_argument(
         "--model",
-        default=os.getenv("PORT_CONVO_MODEL", "gpt-5-nano"),
+        default=os.getenv("PORT_CONVO_MODEL", "gpt-4o-mini"),
         help="LLM model identifier (default: gpt-5-nano).",
     )
     parser.add_argument("--temperature", type=float, default=0.2, help="LLM temperature (if supported by model).")

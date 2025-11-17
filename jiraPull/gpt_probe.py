@@ -41,6 +41,14 @@ def main() -> int:
         output_text = raw_json.get("output", [{}])[0].get("content", [{}])[0].get("text", "") if raw_json.get("output") else ""
         payload = {
             "api_key_present": bool(api_key),
+            "environment": {
+                "openai_version": getattr(OpenAI, "__version__", "unknown"),
+                "python_version": sys.version,
+                "env_vars": {
+                    "PORT_CONVO_MODEL": os.getenv("PORT_CONVO_MODEL"),
+                    "GPT_PROBE_HEALTH_MODEL": os.getenv("GPT_PROBE_HEALTH_MODEL"),
+                },
+            },
             "health_check": {
                 "model": os.getenv("GPT_PROBE_HEALTH_MODEL", "gpt-4o-mini"),
                 "prompt": health_prompt,
