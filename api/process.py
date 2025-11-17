@@ -1,16 +1,22 @@
-from http.server import BaseHTTPRequestHandler
 import json
+from http.server import BaseHTTPRequestHandler
 import traceback
 
 
 class handler(BaseHTTPRequestHandler):
-    def _write(self, text: str):
-        self.wfile.write(text.encode("utf-8"))
+    def _respond_json(self, status_code: int, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self._write("Process endpoint ready. Use POST with optional JSON body {\"limit\": n}.")
+        self._respond_json(
+            200,
+            {"ok": True, "message": "Process endpoint ready. POST with optional JSON body {\"limit\": n}."},
+        )
 
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", "0") or 0)
@@ -25,17 +31,21 @@ class handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
-        self.send_response(200)
-        self.end_headers()
         try:
             import process_job
 
             stdout, stderr = process_job.run(limit=limit)
             summary = process_job.describe_success(stdout)
-            response_lines = [f"process_job.run(limit={limit}) executed.", summary]
-            if stderr.strip():
-                response_lines.append("stderr:\n" + stderr.strip())
-            self._write("\n".join(response_lines))
+            self._respond_json(
+                200,
+                {
+                    "ok": True,
+                    "summary": summary,
+                    "limit": limit,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                },
+            )
         except Exception:
             traceback.print_exc()
-            self._write("error in process_job.run(); see logs")
+            self._respond_json(500, {"ok": False, "error": "error in process_job.run(); see logs"})
