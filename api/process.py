@@ -1,4 +1,5 @@
 import json
+import os
 from http.server import BaseHTTPRequestHandler
 import traceback
 
@@ -22,19 +23,23 @@ class handler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0") or 0)
         body_bytes = self.rfile.read(content_length) if content_length else b""
         limit = 50
+        model: str | None = None
         if body_bytes:
             try:
                 data = json.loads(body_bytes.decode("utf-8"))
                 maybe_limit = data.get("limit")
                 if isinstance(maybe_limit, int) and maybe_limit > 0:
                     limit = maybe_limit
+                maybe_model = data.get("model")
+                if isinstance(maybe_model, str) and maybe_model.strip():
+                    model = maybe_model.strip()
             except Exception:
                 pass
 
         try:
             import process_job
 
-            stdout, stderr = process_job.run(limit=limit)
+            stdout, stderr = process_job.run(limit=limit, model=model)
             summary = process_job.describe_success(stdout)
             self._respond_json(
                 200,
@@ -42,6 +47,7 @@ class handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "summary": summary,
                     "limit": limit,
+                    "model": model or os.getenv("PORT_CONVO_MODEL") or os.getenv("PORT_CONVO_DEFAULT_MODEL"),
                     "stdout": stdout,
                     "stderr": stderr,
                 },

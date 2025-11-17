@@ -1080,47 +1080,92 @@ def build_responses_input(system_prompt: str, user_prompt: str) -> List[Dict[str
     ]
 
 
+def _coerce_output_blocks(response: Any) -> List[Any]:
+    candidate = None
+    if hasattr(response, "output"):
+        candidate = getattr(response, "output", None)
+    if candidate is None and isinstance(response, dict):
+        candidate = response.get("output")
+    if candidate is None and hasattr(response, "model_dump"):
+        try:
+            dumped = response.model_dump()
+            if isinstance(dumped, dict):
+                candidate = dumped.get("output")
+        except Exception:
+            candidate = None
+    if not isinstance(candidate, list):
+        return []
+    return candidate
+
+
+def _extract_text_from_content_item(content: Any) -> Optional[str]:
+    if content is None:
+        return None
+    if isinstance(content, str):
+        text = content.strip()
+        return text or None
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        if isinstance(text, dict):
+            value = text.get("value")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        value = content.get("value")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if content.get("type") == "output_text":
+            val = content.get("text")
+            if isinstance(val, dict):
+                inner = val.get("value")
+                if isinstance(inner, str) and inner.strip():
+                    return inner.strip()
+            elif isinstance(val, str) and val.strip():
+                return val.strip()
+    text_attr = getattr(content, "text", None)
+    if isinstance(text_attr, str) and text_attr.strip():
+        return text_attr.strip()
+    value_attr = getattr(content, "value", None)
+    if isinstance(value_attr, str) and value_attr.strip():
+        return value_attr.strip()
+    return None
+
+
 def extract_text_from_responses(response: Any) -> str:
+    segments: List[str] = []
     try:
-        if hasattr(response, "output"):
-            segments: List[str] = []
-            for item in getattr(response, "output", []):
-                contents = getattr(item, "content", [])
-                for content in contents:
-                    text = getattr(content, "text", None)
-                    if isinstance(text, str):
+        for block in _coerce_output_blocks(response):
+            contents = getattr(block, "content", None)
+            if contents is None and isinstance(block, dict):
+                contents = block.get("content")
+            if isinstance(contents, list):
+                for entry in contents:
+                    text = _extract_text_from_content_item(entry)
+                    if text:
                         segments.append(text)
-                    elif isinstance(text, dict) and "value" in text:
-                        segments.append(str(text["value"]))
-                    elif isinstance(content, dict):
-                        if content.get("type") == "output_text":
-                            val = content.get("text")
-                            if isinstance(val, dict):
-                                segments.append(str(val.get("value", "")))
-                            elif isinstance(val, str):
-                                segments.append(val)
-            if segments:
-                return "\n".join(segments)
-        if isinstance(response, dict):
-            output = response.get("output") or []
-            segments: List[str] = []
-            for item in output:
-                for content in item.get("content", []):
-                    text = content.get("text")
-                    if isinstance(text, str):
-                        segments.append(text)
-                    elif isinstance(text, dict):
-                        segments.append(str(text.get("value", "")))
-                    elif content.get("type") == "output_text":
-                        val = content.get("text")
-                        if isinstance(val, dict):
-                            segments.append(str(val.get("value", "")))
-                        elif isinstance(val, str):
-                            segments.append(val)
-            if segments:
-                return "\n".join(segments)
+            else:
+                text = _extract_text_from_content_item(contents)
+                if text:
+                    segments.append(text)
+            if not contents and isinstance(block, dict):
+                summary_entries = block.get("summary")
+                if isinstance(summary_entries, list):
+                    for entry in summary_entries:
+                        text = _extract_text_from_content_item(entry)
+                        if text:
+                            segments.append(text)
+        if segments:
+            return "\n".join(segments)
         if hasattr(response, "output_text"):
-            return str(response.output_text)
+            text_value = getattr(response, "output_text")
+            if isinstance(text_value, str):
+                return text_value
+        if isinstance(response, dict):
+            for key in ("output_text", "text"):
+                candidate = response.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
     except Exception:
         pass
     return ""

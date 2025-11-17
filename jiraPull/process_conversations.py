@@ -47,9 +47,11 @@ def resolve_default_model() -> str:
     explicit = os.getenv("PORT_CONVO_MODEL")
     if explicit:
         return explicit
-    if os.getenv("VERCEL") == "1":
-        return "gpt-4o-mini"
-    return "gpt-5-nano"
+    env_default = os.getenv("PORT_CONVO_DEFAULT_MODEL")
+    if env_default:
+        return env_default
+    # Default to GPT-5 mini-tier models for both local + Vercel deployments.
+    return "gpt-5.0-mini"
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=resolve_default_model(),
-        help="LLM model identifier (local builds default to gpt-5-nano).",
+        help="LLM model identifier (defaults to gpt-5.0-mini unless overridden).",
     )
     parser.add_argument("--temperature", type=float, default=0.2, help="LLM temperature (if supported by model).")
     parser.add_argument("--max-output-tokens", type=int, default=8000, help="LLM max completion tokens.")

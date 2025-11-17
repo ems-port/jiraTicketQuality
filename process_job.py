@@ -1,7 +1,7 @@
 import os
 import subprocess
 from datetime import datetime
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 PYTHON_BIN = os.getenv("PYTHON_BIN", "python3")
 PROCESS_SCRIPT = os.path.join(os.getcwd(), "jiraPull", "process_conversations.py")
@@ -44,11 +44,15 @@ def _required_env() -> Dict[str, str]:
     }
 
 
-def run(limit: int = 50) -> Tuple[str, str]:
+def run(limit: int = 50, model: Optional[str] = None) -> Tuple[str, str]:
     env = {**os.environ, **_required_env(), "PYTHONUNBUFFERED": "1"}
+    args = [PYTHON_BIN, PROCESS_SCRIPT, "--limit", str(limit)]
+    resolved_model = (model or os.getenv("PORT_CONVO_MODEL") or os.getenv("PORT_CONVO_DEFAULT_MODEL"))
+    if resolved_model:
+        args.extend(["--model", resolved_model])
     try:
         completed = subprocess.run(
-            [PYTHON_BIN, PROCESS_SCRIPT, "--limit", str(limit)],
+            args,
             check=True,
             capture_output=True,
             text=True,
