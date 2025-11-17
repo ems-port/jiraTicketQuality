@@ -6,9 +6,14 @@ const PYTHON_BIN = process.env.PYTHON_BIN || "python3";
 const INGEST_SCRIPT = "jiraPull/injestionJiraTickes.py";
 const PROCESS_SCRIPT = "jiraPull/process_conversations.py";
 const PREPARED_TABLE = process.env.SUPABASE_JIRA_PREPARED_TABLE || "jira_prepared_conversations";
+const PROCESS_CONCURRENCY = Math.max(
+  1,
+  Number.parseInt(process.env.JIRA_PROCESS_CONCURRENCY || "12", 10) || 12
+);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const REMOTE_PROCESS_MAX_BATCH = Math.max(1, Number(process.env.REMOTE_PROCESS_MAX_BATCH ?? 1));
 
 export type RefreshJobStage = "idle" | "ingesting" | "processing" | "completed" | "error";
 
@@ -160,50 +165,53 @@ async function runProcessor(totalHint: number | null): Promise<number> {
   let total = typeof totalHint === "number" && totalHint > 0 ? totalHint : null;
   const processingStartedAt = Date.now();
   const limit = Math.max(1, total ?? 50);
-  await runPythonScript([PROCESS_SCRIPT, "--limit", String(limit)], (line) => {
-    const progressMatch = line.match(/Processing progress:\s*(\d+)\/(\d+)/i);
-    if (progressMatch) {
-      processed = parseInt(progressMatch[1], 10);
-      total = parseInt(progressMatch[2], 10) || total;
-    } else if (line.startsWith("Processing ")) {
-      processed += 1;
-    }
+  await runPythonScript(
+    [PROCESS_SCRIPT, "--limit", String(limit), "--concurrency", String(PROCESS_CONCURRENCY)],
+    (line) => {
+      const progressMatch = line.match(/Processing progress:\s*(\d+)\/(\d+)/i);
+      if (progressMatch) {
+        processed = parseInt(progressMatch[1], 10);
+        total = parseInt(progressMatch[2], 10) || total;
+      } else if (line.startsWith("Processing ")) {
+        processed += 1;
+      }
 
-    if (progressMatch || line.startsWith("Processing ")) {
-      const etaSeconds = total && processed > 0
-        ? Math.max(0, Math.round(((Date.now() - processingStartedAt) / processed / 1000) * (total - processed)))
-        : undefined;
-      updateJobState({
-        processedTickets: processed,
-        totalToProcess: total ?? undefined,
-        etaSeconds,
-        message: total
-          ? `Processing ${processed}/${total} conversations...`
-          : `Processing ${processed} conversations...`
-      });
-      return;
-    }
-
-    if (line.includes("Stored ") && line.includes("processed conversations")) {
-      const match = line.match(/Stored\s+(\d+)\s+processed conversations/i);
-      if (match) {
-        processed = parseInt(match[1], 10);
+      if (progressMatch || line.startsWith("Processing ")) {
+        const etaSeconds = total && processed > 0
+          ? Math.max(0, Math.round(((Date.now() - processingStartedAt) / processed / 1000) * (total - processed)))
+          : undefined;
         updateJobState({
           processedTickets: processed,
+          totalToProcess: total ?? undefined,
+          etaSeconds,
+          message: total
+            ? `Processing ${processed}/${total} conversations...`
+            : `Processing ${processed} conversations...`
+        });
+        return;
+      }
+
+      if (line.includes("Stored ") && line.includes("processed conversations")) {
+        const match = line.match(/Stored\s+(\d+)\s+processed conversations/i);
+        if (match) {
+          processed = parseInt(match[1], 10);
+          updateJobState({
+            processedTickets: processed,
+            etaSeconds: undefined,
+            message: `Stored ${processed} processed conversations.`
+          });
+        }
+      } else if (line.includes("No new conversations to process")) {
+        processed = 0;
+        updateJobState({
+          processedTickets: 0,
           etaSeconds: undefined,
-          message: `Stored ${processed} processed conversations.`
+          message: "No new conversations to process.",
+          totalToProcess: 0
         });
       }
-    } else if (line.includes("No new conversations to process")) {
-      processed = 0;
-      updateJobState({
-        processedTickets: 0,
-        etaSeconds: undefined,
-        message: "No new conversations to process.",
-        totalToProcess: 0
-      });
     }
-  });
+  );
   return processed;
 }
 
@@ -337,23 +345,47 @@ async function triggerRemoteIngest() {
   return { fetched: 0, skipped: 0 };
 }
 
-async function triggerRemoteProcess(totalHint: number | null) {
-  const result = (await callPythonFunction("/api/process", totalHint ? { limit: totalHint } : undefined)) as {
+async function triggerRemoteProcess(batchHint: number | null) {
+  const limit = (() => {
+    if (typeof batchHint === "number" && batchHint > 0) {
+      return Math.min(batchHint, REMOTE_PROCESS_MAX_BATCH);
+    }
+    return REMOTE_PROCESS_MAX_BATCH;
+  })();
+  const result = (await callPythonFunction("/api/process", { limit })) as {
     stdout?: string | null;
   } | null;
   const processed = parseProcessingSummary(result?.stdout ?? null);
   if (typeof processed === "number") {
     updateJobState({
       processedTickets: processed,
-      message: `Remote processing stored ${processed} conversations.`
+      message: `Remote processing stored ${processed} conversations (batch size ${limit}).`
     });
     return processed;
   }
   updateJobState({
     processedTickets: undefined,
-    message: "Triggered remote processing (check logs for details)."
+    message: `Triggered remote processing (batch size ${limit}).`
   });
   return 0;
+}
+
+async function runRemoteProcessing(totalPending: number | null) {
+  if (totalPending === null) {
+    return triggerRemoteProcess(null);
+  }
+  let remaining = totalPending;
+  let totalProcessed = 0;
+  while (remaining > 0) {
+    const batch = Math.min(remaining, REMOTE_PROCESS_MAX_BATCH);
+    const processed = await triggerRemoteProcess(batch);
+    totalProcessed += processed;
+    if (processed < batch) {
+      break;
+    }
+    remaining -= processed;
+  }
+  return totalProcessed;
 }
 
 async function executeJob() {
@@ -383,7 +415,7 @@ async function executeJob() {
       updateJobState({ totalToProcess: pending, message: pending > 0 ? `Processing ${pending} conversations...` : "Processing queue is empty." });
     }
 
-    const processed = isProductionHosted() ? await triggerRemoteProcess(pending) : await runProcessor(pending);
+    const processed = isProductionHosted() ? await runRemoteProcessing(pending) : await runProcessor(pending);
 
     updateJobState({
       running: false,

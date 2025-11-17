@@ -7,7 +7,9 @@ import argparse
 import json
 import logging
 import os
+import random
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -69,8 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=8,
-        help="Number of parallel threads for LLM processing (default: 8).",
+        default=12,
+        help="Number of parallel threads for LLM processing (default: 12).",
     )
     parser.add_argument("--dry-run", action="store_true", help="Compute results but do not write to Supabase.")
     return parser.parse_args()
@@ -360,6 +362,8 @@ def _process_payload_worker(
     taxonomy: Sequence[str],
     max_attempts: int,
 ) -> tuple[str, Dict[str, Any]]:
+    # Introduce a small randomized delay to reduce simultaneous API calls.
+    time.sleep(random.uniform(0, 0.5))
     issue_key = (payload.get("issue_key") or "").strip()
     if not issue_key:
         raise ConversationProcessingError("Payload missing issue_key.")
