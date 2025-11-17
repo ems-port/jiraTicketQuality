@@ -50,8 +50,8 @@ def resolve_default_model() -> str:
     env_default = os.getenv("PORT_CONVO_DEFAULT_MODEL")
     if env_default:
         return env_default
-    # Default to GPT-5 mini-tier models for both local + Vercel deployments.
-    return "gpt-5.0-mini"
+    # Default to GPT-5 nano tier until higher tiers are available.
+    return "gpt-5-nano"
 
 
 def parse_args() -> argparse.Namespace:
