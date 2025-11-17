@@ -10,3 +10,4 @@ node_modules/
 **/node_modules/
 .next/
 tsconfig.tsbuildinfo
+.vercel

@@ -54,10 +54,14 @@ def handler(request):
         completed = subprocess.run(
             [PYTHON_BIN, INGEST_SCRIPT],
             check=True,
-            capture_output=False,
+            capture_output=True,
             text=True,
             env=env
         )
+        if completed.stdout:
+            print("[ingest stdout]", completed.stdout)
+        if completed.stderr:
+            print("[ingest stderr]", completed.stderr)
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
@@ -68,7 +72,13 @@ def handler(request):
             })
         }
     except subprocess.CalledProcessError as exc:
-        error_text = str(exc)
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if stdout:
+            print("[ingest stdout]", stdout)
+        if stderr:
+            print("[ingest stderr]", stderr)
+        error_text = stderr or stdout or str(exc)
         print("[ingest error exit]", error_text)
         return {
             "statusCode": 500,

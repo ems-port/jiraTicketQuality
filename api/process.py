@@ -37,7 +37,8 @@ def handler(request):
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"error": f"Missing credentials: {', '.join(missing)}"`
+            "body": json.dumps({"error": f"Missing credentials: {', '.join(missing)}"})
+        }
 
     limit = request.body.get("limit") if hasattr(request, "body") else None
     if not limit:
@@ -57,10 +58,14 @@ def handler(request):
         completed = subprocess.run(
             [PYTHON_BIN, PROCESS_SCRIPT, "--limit", str(limit)],
             check=True,
-            capture_output=False,
+            capture_output=True,
             text=True,
             env=env
         )
+        if completed.stdout:
+            print("[process stdout]", completed.stdout)
+        if completed.stderr:
+            print("[process stderr]", completed.stderr)
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
@@ -71,7 +76,13 @@ def handler(request):
             })
         }
     except subprocess.CalledProcessError as exc:
-        error_text = str(exc)
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if stdout:
+            print("[process stdout]", stdout)
+        if stderr:
+            print("[process stderr]", stderr)
+        error_text = stderr or stdout or str(exc)
         print("[process error exit]", error_text)
         return {
             "statusCode": 500,
