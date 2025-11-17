@@ -17,48 +17,64 @@ def handler(request):
 
     supabase_url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    jira_base = os.getenv("JIRA_BASE_URL") or os.getenv("JIRA_BASEURL") or os.getenv("JIRA_URL")
+    jira_user = os.getenv("JIRA_USERNAME") or os.getenv("JIRA_EMAIL")
+    jira_token = os.getenv("JIRA_API_TOKEN") or os.getenv("JIRA_TOKEN")
 
-    if not supabase_url or not supabase_key:
+    missing: list[str] = []
+    if not supabase_url:
+        missing.append("SUPABASE_URL")
+    if not supabase_key:
+        missing.append("SUPABASE_SERVICE_ROLE_KEY")
+    if not jira_base:
+        missing.append("JIRA_BASE_URL")
+    if not jira_user:
+        missing.append("JIRA_USERNAME")
+    if not jira_token:
+        missing.append("JIRA_API_TOKEN")
+
+    if missing:
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"error": "Missing Supabase credentials"})
+            "body": json.dumps({"error": f"Missing credentials: {', '.join(missing)}"})
         }
 
     try:
-        result = subprocess.run(
+        env = {
+            **os.environ,
+            "SUPABASE_URL": supabase_url,
+            "SUPABASE_SERVICE_ROLE_KEY": supabase_key,
+            "JIRA_BASE_URL": jira_base,
+            "JIRA_USERNAME": jira_user,
+            "JIRA_API_TOKEN": jira_token,
+            "PYTHONUNBUFFERED": "1"
+        }
+        completed = subprocess.run(
             [PYTHON_BIN, INGEST_SCRIPT],
             check=True,
-            capture_output=True,
+            capture_output=False,
             text=True,
-            env={**os.environ,
-                 "SUPABASE_URL": supabase_url,
-                 "SUPABASE_SERVICE_ROLE_KEY": supabase_key}
+            env=env
         )
-        if result.stdout:
-            print("[ingest stdout]", result.stdout)
-        if result.stderr:
-            print("[ingest stderr]", result.stderr)
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps({
                 "ok": True,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "exitCode": completed.returncode,
                 "finishedAt": datetime.utcnow().isoformat()
             })
         }
     except subprocess.CalledProcessError as exc:
-        error_text = exc.stderr or exc.stdout or str(exc)
-        print("[ingest error]", error_text)
+        error_text = str(exc)
+        print("[ingest error exit]", error_text)
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps({
                 "error": error_text,
-                "stdout": exc.stdout,
-                "stderr": exc.stderr
+                "exitCode": exc.returncode
             })
         }
     except Exception as exc:  # pylint: disable=broad-except
