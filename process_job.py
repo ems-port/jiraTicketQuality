@@ -44,22 +44,25 @@ def _required_env() -> Dict[str, str]:
     }
 
 
-def run(limit: int = 50) -> Tuple[str, str]:
-    env = {
-        **os.environ,
-        **_required_env(),
-        "PYTHONUNBUFFERED": "1"
-    }
-    completed = subprocess.run(
-        [PYTHON_BIN, PROCESS_SCRIPT, "--limit", str(limit)],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env
-    )
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
-    return stdout, stderr
+def run(limit: int = 1) -> Tuple[str, str]:
+    env = {**os.environ, **_required_env(), "PYTHONUNBUFFERED": "1"}
+    try:
+        completed = subprocess.run(
+            [PYTHON_BIN, PROCESS_SCRIPT, "--limit", str(limit)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        return stdout, stderr
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - runtime safety
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        raise RuntimeError(
+            f"process_conversations exited with {exc.returncode}. stdout:\\n{stdout}\\n\\nstderr:\\n{stderr}"
+        ) from exc
 
 
 def describe_success(stdout: str) -> str:
