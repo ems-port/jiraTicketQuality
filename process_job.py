@@ -44,7 +44,7 @@ def _required_env() -> Dict[str, str]:
     }
 
 
-def run(limit: int = 1) -> Tuple[str, str]:
+def run(limit: int = 50) -> Tuple[str, str]:
     env = {**os.environ, **_required_env(), "PYTHONUNBUFFERED": "1"}
     try:
         completed = subprocess.run(

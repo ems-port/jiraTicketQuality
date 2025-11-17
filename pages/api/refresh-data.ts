@@ -13,7 +13,7 @@ const PROCESS_CONCURRENCY = Math.max(
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const REMOTE_PROCESS_MAX_BATCH = Math.max(1, Number(process.env.REMOTE_PROCESS_MAX_BATCH ?? 1));
+const REMOTE_PROCESS_MAX_BATCH = Math.max(1, Number(process.env.REMOTE_PROCESS_MAX_BATCH ?? 20));
 
 export type RefreshJobStage = "idle" | "ingesting" | "processing" | "completed" | "error";
 
@@ -345,45 +345,45 @@ async function triggerRemoteIngest() {
   return { fetched: 0, skipped: 0 };
 }
 
-async function triggerRemoteProcess(batchHint: number | null) {
-  const limit = (() => {
-    if (typeof batchHint === "number" && batchHint > 0) {
-      return Math.min(batchHint, REMOTE_PROCESS_MAX_BATCH);
-    }
-    return REMOTE_PROCESS_MAX_BATCH;
-  })();
-  const result = (await callPythonFunction("/api/process", { limit })) as {
+async function triggerRemoteProcess(limit: number) {
+  const safeLimit = Math.max(1, Math.min(limit, REMOTE_PROCESS_MAX_BATCH));
+  const result = (await callPythonFunction("/api/process", { limit: safeLimit })) as {
     stdout?: string | null;
   } | null;
   const processed = parseProcessingSummary(result?.stdout ?? null);
   if (typeof processed === "number") {
     updateJobState({
       processedTickets: processed,
-      message: `Remote processing stored ${processed} conversations (batch size ${limit}).`
+      message: `Remote processing stored ${processed} conversations (batch size ${safeLimit}).`
     });
     return processed;
   }
   updateJobState({
     processedTickets: undefined,
-    message: `Triggered remote processing (batch size ${limit}).`
+    message: `Triggered remote processing (batch size ${safeLimit}).`
   });
   return 0;
 }
 
 async function runRemoteProcessing(totalPending: number | null) {
-  if (totalPending === null) {
-    return triggerRemoteProcess(null);
+  if (totalPending === null || totalPending <= 0) {
+    return triggerRemoteProcess(REMOTE_PROCESS_MAX_BATCH);
   }
   let remaining = totalPending;
   let totalProcessed = 0;
   while (remaining > 0) {
-    const batch = Math.min(remaining, REMOTE_PROCESS_MAX_BATCH);
-    const processed = await triggerRemoteProcess(batch);
+    const batchSize = Math.min(remaining, REMOTE_PROCESS_MAX_BATCH);
+    const processed = await triggerRemoteProcess(batchSize);
     totalProcessed += processed;
-    if (processed < batch) {
+    remaining = Math.max(0, remaining - processed);
+    updateJobState({
+      processedTickets: totalProcessed,
+      totalToProcess: remaining,
+      message: `Remote processing stored ${totalProcessed} conversations, ${remaining} remaining...`
+    });
+    if (processed < batchSize) {
       break;
     }
-    remaining -= processed;
   }
   return totalProcessed;
 }
