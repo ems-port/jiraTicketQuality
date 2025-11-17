@@ -1,8 +1,36 @@
 import json
-from http.server import BaseHTTPRequestHandler
 import traceback
 import sys
 import os
+from http.server import BaseHTTPRequestHandler
+
+try:  # Python 3.8 compatibility on Vercel
+    from importlib import metadata as importlib_metadata
+except ImportError:  # pragma: no cover - fallback for older runtimes
+    import importlib_metadata  # type: ignore
+
+
+def log_runtime_state() -> None:
+    """Emit diagnostics about the Python/OpenAI runtime for Vercel logs."""
+    prefix = "[gpt-test]"
+    print(f"{prefix} Python executable: {sys.executable}", file=sys.stderr, flush=True)
+    print(f"{prefix} Python version: {sys.version}", file=sys.stderr, flush=True)
+    try:
+        import openai  # type: ignore
+
+        module_version = getattr(openai, "__version__", "unknown")
+        module_path = getattr(openai, "__file__", "unknown")
+        try:
+            installed_version = importlib_metadata.version("openai")
+        except Exception:
+            installed_version = "unknown"
+        print(
+            f"{prefix} openai import OK -> __version__={module_version}, dist-info version={installed_version}, path={module_path}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"{prefix} openai import FAILED: {exc}", file=sys.stderr, flush=True)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -19,6 +47,7 @@ class handler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length) if content_length else b""
         prompt = None
         model = None
+        log_runtime_state()
         print("[gpt-test] Raw body:", body, file=sys.stderr, flush=True)
         if body:
             try:
