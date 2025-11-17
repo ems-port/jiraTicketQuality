@@ -19,7 +19,7 @@ def handler(request):
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     jira_base = os.getenv("JIRA_BASE_URL") or os.getenv("JIRA_BASEURL") or os.getenv("JIRA_URL")
     jira_user = os.getenv("JIRA_USERNAME") or os.getenv("JIRA_EMAIL")
-    jira_token = os.getenv("JIRA_API_TOKEN") or os.getenv("JIRA_TOKEN")
+    jira_token = os.getenv("JIRA_API_TOKEN") or os.getenv("JIRA_API_KEY") or os.getenv("JIRA_TOKEN")
 
     missing: list[str] = []
     if not supabase_url:
@@ -31,7 +31,7 @@ def handler(request):
     if not jira_user:
         missing.append("JIRA_USERNAME")
     if not jira_token:
-        missing.append("JIRA_API_TOKEN")
+        missing.append("JIRA_API_TOKEN/JIRA_API_KEY")
 
     if missing:
         return {
@@ -48,6 +48,7 @@ def handler(request):
             "JIRA_BASE_URL": jira_base,
             "JIRA_USERNAME": jira_user,
             "JIRA_API_TOKEN": jira_token,
+            "JIRA_API_KEY": jira_token,
             "PYTHONUNBUFFERED": "1"
         }
         completed = subprocess.run(
