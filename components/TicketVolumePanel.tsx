@@ -196,7 +196,7 @@ function buildVolumeSeries(
   const alignedEnd = Math.ceil(endTime / bucketMs) * bucketMs;
   const buckets: VolumePoint[] = [];
 
-  for (let ts = alignedStart; ts <= alignedEnd; ts += bucketMs) {
+  for (let ts = alignedStart; ts < alignedEnd; ts += bucketMs) {
     buckets.push({
       label: formatBucketLabel(ts),
       count: 0,
@@ -210,7 +210,7 @@ function buildVolumeSeries(
       return;
     }
     const ts = reference.getTime();
-    if (ts < alignedStart || ts > alignedEnd) {
+    if (ts < alignedStart || ts >= alignedEnd) {
       return;
     }
     const bucketIndex = Math.min(

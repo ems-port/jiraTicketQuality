@@ -1282,9 +1282,10 @@ function computeLatestTicketInfo(rows: ConversationRow[]): LatestTicketInfo | nu
   if (!latestRow) {
     return null;
   }
-  const reference = latestRow.endedAt ?? latestRow.startedAt ?? null;
+  const resolvedRow: ConversationRow = latestRow;
+  const reference = resolvedRow.endedAt ?? resolvedRow.startedAt ?? null;
   return {
-    key: latestRow.issueKey,
+    key: resolvedRow.issueKey,
     dateLabel: formatShortDate(reference)
   };
 }

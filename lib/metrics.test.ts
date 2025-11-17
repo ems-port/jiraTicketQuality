@@ -225,7 +225,7 @@ describe("toxicity detection", () => {
   ];
 
   it("returns most abusive customers using available signals", () => {
-    const results = computeToxicCustomers(rows, settings, NOW, 5);
+    const results = computeToxicCustomers(rows, settings, NOW, { limit: 5 });
     expect(results).toHaveLength(2);
     expect(results[0]?.entity).toBe("Customer B");
     expect(results[0]?.meanToxicity).toBeGreaterThan(0.8);
