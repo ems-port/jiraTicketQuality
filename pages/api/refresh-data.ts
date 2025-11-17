@@ -211,24 +211,38 @@ function isProductionHosted(): boolean {
   return process.env.VERCEL === "1";
 }
 
-function getInvocationTarget() {
+type InvocationTarget = {
+  urlBase: string;
+  headers: Record<string, string>;
+  mode: "internal" | "public" | "local";
+};
+
+function getInvocationTarget(): InvocationTarget {
   const internalUrl = process.env.INTERNAL_FUNCTIONS_URL?.replace(/\/$/, "");
-  const internalToken = process.env.INTERNAL_FUNCTIONS_TOKEN;
-  if (internalUrl && internalToken) {
+  const bypassSecret = process.env.INTERNAL_FUNCTIONS_TOKEN || process.env.VERCEL_AUTOMATION_BYPASS_SECRET;
+  if (internalUrl && bypassSecret) {
     return {
       urlBase: internalUrl,
-      authorization: `Bearer ${internalToken}`,
-      mode: "internal" as const
+      headers: {
+        "x-vercel-protection-bypass": bypassSecret
+      },
+      mode: "internal"
     };
   }
   const fallbackHost = process.env.VERCEL_URL
     ? `https://${process.env.VERCEL_URL}`
     : `http://localhost:${process.env.PORT || 3000}`;
-  const secret = process.env.REFRESH_CRON_SECRET ? `Bearer ${process.env.REFRESH_CRON_SECRET}` : undefined;
+  const headers: Record<string, string> = {};
+  if (process.env.REFRESH_CRON_SECRET) {
+    headers.Authorization = `Bearer ${process.env.REFRESH_CRON_SECRET}`;
+  }
+  if (bypassSecret) {
+    headers["x-vercel-protection-bypass"] = bypassSecret;
+  }
   return {
     urlBase: fallbackHost.replace(/\/$/, ""),
-    authorization: secret,
-    mode: process.env.VERCEL_URL ? ("public" as const) : ("local" as const)
+    headers,
+    mode: process.env.VERCEL_URL ? "public" : "local"
   };
 }
 
@@ -243,7 +257,7 @@ async function callPythonFunction(path: string, payload?: Record<string, unknown
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(target.authorization ? { Authorization: target.authorization } : {})
+        ...target.headers
       },
       body: payload ? JSON.stringify(payload) : undefined
     });

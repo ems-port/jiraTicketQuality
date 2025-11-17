@@ -35,6 +35,10 @@ def handler(request):
                  "SUPABASE_URL": supabase_url,
                  "SUPABASE_SERVICE_ROLE_KEY": supabase_key}
         )
+        if result.stdout:
+            print("[ingest stdout]", result.stdout)
+        if result.stderr:
+            print("[ingest stderr]", result.stderr)
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
@@ -46,11 +50,13 @@ def handler(request):
             })
         }
     except subprocess.CalledProcessError as exc:
+        error_text = exc.stderr or exc.stdout or str(exc)
+        print("[ingest error]", error_text)
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps({
-                "error": exc.stderr or str(exc),
+                "error": error_text,
                 "stdout": exc.stdout,
                 "stderr": exc.stderr
             })
