@@ -458,6 +458,7 @@ def process_record(
                     "system_prompt_preview": system_prompt[:200],
                     "user_prompt_preview": user_prompt[:200],
                     "error": error_msg,
+                    "response_preview": (json.dumps(llm_payload)[:500] if llm_payload else None),
                 },
             )
             raise ConversationProcessingError(error_msg or "LLM returned empty response.")
