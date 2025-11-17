@@ -1,6 +1,8 @@
 /** @type {import('next').NextConfig} */
 const path = require("node:path");
+const fs = require("node:fs");
 const { execSync } = require("node:child_process");
+const BUILD_INFO_PATH = path.join(__dirname, "build-info.json");
 
 function isGitAvailable() {
   try {
@@ -51,9 +53,32 @@ function computeGitBuildNumber() {
   }
 }
 
+function readBuildNumberFromFile() {
+  try {
+    if (!fs.existsSync(BUILD_INFO_PATH)) {
+      return null;
+    }
+    const raw = fs.readFileSync(BUILD_INFO_PATH, "utf-8");
+    const data = JSON.parse(raw);
+    if (data && typeof data.buildNumber === "number") {
+      return String(data.buildNumber);
+    }
+    if (data && typeof data.buildNumber === "string") {
+      return data.buildNumber;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveBuildNumber() {
   if (process.env.NEXT_PUBLIC_BUILD_NUMBER) {
     return process.env.NEXT_PUBLIC_BUILD_NUMBER;
+  }
+  const stored = readBuildNumberFromFile();
+  if (stored) {
+    return stored;
   }
   const gitCount = computeGitBuildNumber();
   if (gitCount) {

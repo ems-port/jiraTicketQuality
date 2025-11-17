@@ -30,6 +30,7 @@ export type RefreshJobState = {
   etaSeconds?: number;
   lastCompletedAt?: number | null;
   error?: string;
+  pendingConversations?: number | null;
 };
 
 const INITIAL_STATE: RefreshJobState = {
@@ -37,7 +38,8 @@ const INITIAL_STATE: RefreshJobState = {
   stage: "idle",
   startedAt: null,
   updatedAt: null,
-  lastCompletedAt: null
+  lastCompletedAt: null,
+  pendingConversations: null
 };
 
 export let jobState: RefreshJobState = { ...INITIAL_STATE };
@@ -349,7 +351,11 @@ async function triggerRemoteProcess(limit: number) {
   const safeLimit = Math.max(1, Math.min(limit, REMOTE_PROCESS_MAX_BATCH));
   const result = (await callPythonFunction("/api/process", { limit: safeLimit })) as {
     stdout?: string | null;
+    pending?: number | null;
   } | null;
+  if (typeof result?.pending === "number") {
+    updateJobState({ pendingConversations: result.pending });
+  }
   const processed = parseProcessingSummary(result?.stdout ?? null);
   if (typeof processed === "number") {
     updateJobState({
@@ -379,12 +385,14 @@ async function runRemoteProcessing(totalPending: number | null) {
     updateJobState({
       processedTickets: totalProcessed,
       totalToProcess: remaining,
+      pendingConversations: remaining,
       message: `Remote processing stored ${totalProcessed} conversations, ${remaining} remaining...`
     });
     if (processed < batchSize) {
       break;
     }
   }
+  updateJobState({ pendingConversations: Math.max(0, remaining) });
   return totalProcessed;
 }
 
@@ -400,7 +408,8 @@ async function executeJob() {
       processedTickets: undefined,
       totalToProcess: undefined,
       etaSeconds: undefined,
-      error: undefined
+      error: undefined,
+      pendingConversations: undefined
     });
 
     const ingestResult = isProductionHosted() ? await triggerRemoteIngest() : await runIngestion();
@@ -412,17 +421,27 @@ async function executeJob() {
 
     const pending = await countPendingConversations();
     if (pending !== null) {
-      updateJobState({ totalToProcess: pending, message: pending > 0 ? `Processing ${pending} conversations...` : "Processing queue is empty." });
+      updateJobState({
+        totalToProcess: pending,
+        pendingConversations: pending,
+        message: pending > 0 ? `Processing ${pending} conversations...` : "Processing queue is empty."
+      });
     }
 
     const processed = isProductionHosted() ? await runRemoteProcessing(pending) : await runProcessor(pending);
+
+    const remainingPending = await countPendingConversations();
+    const hasRemaining = typeof remainingPending === "number" && remainingPending > 0;
 
     updateJobState({
       running: false,
       stage: "completed",
       processedTickets: processed,
+      pendingConversations: remainingPending ?? undefined,
       message:
-        ingestResult.fetched || processed
+        hasRemaining
+          ? `Processed ${processed} conversations · ${remainingPending} still queued. Press Fetch data again.`
+          : ingestResult.fetched || processed
           ? `Fetched ${ingestResult.fetched} new tickets · Processed ${processed} conversations.`
           : "Refresh completed (no new data)",
       etaSeconds: undefined,

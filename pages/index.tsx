@@ -88,6 +88,7 @@ type RefreshJobState = {
   etaSeconds?: number;
   lastCompletedAt?: number | null;
   error?: string;
+  pendingConversations?: number | null;
 };
 
 const DEFAULT_REFRESH_STATE: RefreshJobState = {
@@ -95,7 +96,8 @@ const DEFAULT_REFRESH_STATE: RefreshJobState = {
   stage: "idle",
   startedAt: null,
   updatedAt: null,
-  lastCompletedAt: null
+  lastCompletedAt: null,
+  pendingConversations: null
 };
 
 type DrilldownState = {
@@ -778,8 +780,10 @@ export default function DashboardPage({
   );
 
   const lastRefreshTimestamp = refreshState.lastCompletedAt ?? lastRefreshCompletionRef.current ?? null;
+  const hasPendingBacklog = Boolean((refreshState.pendingConversations ?? 0) > 0);
   const needsDataRefresh =
-    !refreshState.running && (!lastRefreshTimestamp || Date.now() - lastRefreshTimestamp > 15 * 60 * 1000);
+    !refreshState.running &&
+    (!lastRefreshTimestamp || Date.now() - lastRefreshTimestamp > 15 * 60 * 1000 || hasPendingBacklog);
   const unresolvedFooterText = selectedResolvedStats.total
     ? `${unresolvedCount.toLocaleString()} of ${selectedResolvedStats.total.toLocaleString()} not resolved`
     : "No tickets in this window";
@@ -831,6 +835,8 @@ export default function DashboardPage({
                       ? "cursor-not-allowed border-slate-800 text-slate-500"
                       : refreshState.running
                       ? "cursor-not-allowed border-slate-700 text-slate-500"
+                      : hasPendingBacklog
+                      ? "border-amber-400 text-amber-200 shadow-[0_0_0_0_rgba(251,191,36,0.4)] animate-pulse"
                       : needsDataRefresh
                       ? "border-amber-400 text-amber-200 hover:bg-amber-500/10"
                       : "border-slate-700 text-slate-200 hover:border-brand-500 hover:text-brand-200"
@@ -904,6 +910,14 @@ export default function DashboardPage({
                       refreshState.message || "Awaiting processing"
                     )}
                   </p>
+                  {hasPendingBacklog && (
+                    <p className="flex items-center gap-2 text-amber-200">
+                      <StatusIcon state="idle" />
+                      {`${refreshState.pendingConversations?.toLocaleString() ?? 0} conversation${
+                        (refreshState.pendingConversations ?? 0) === 1 ? "" : "s"
+                      } still queued · Press Fetch data again`}
+                    </p>
+                  )}
                   {refreshState.stage === "completed" && refreshState.lastCompletedAt ? (
                     <p>{`Updated ${formatRelativeTime(refreshState.lastCompletedAt)}.`}</p>
                   ) : null}
