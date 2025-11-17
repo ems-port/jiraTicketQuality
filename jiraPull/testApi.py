@@ -3,7 +3,7 @@
 import os
 import requests
 from dotenv import load_dotenv
-
+# API TESTING SCRIPT FOR JIRA
 # Load environment variables from .env file
 load_dotenv()
 
