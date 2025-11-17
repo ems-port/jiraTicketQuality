@@ -61,3 +61,14 @@ def handler(request):
                 "stderr": exc.stderr
             })
         }
+    except Exception as exc:  # pylint: disable=broad-except
+        print("[ingest exception]", repr(exc))
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({
+                "error": str(exc),
+                "stdout": None,
+                "stderr": None
+            })
+        }
