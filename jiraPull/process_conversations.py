@@ -431,6 +431,12 @@ def process_record(
     if use_llm:
         if not comments:
             raise ConversationProcessingError("Conversation has no comments; cannot run LLM.")
+        issue_key = (
+            payload.get("issue_key")
+            or payload.get("issueKey")
+            or payload.get("key")
+            or payload.get("name")
+        )
         llm_payload, prompt_tokens, completion_tokens, error_msg = cq.call_llm(
             openai_client=openai_client,
             model=model,
@@ -443,6 +449,17 @@ def process_record(
             debug_output=False,
         )
         if error_msg or not llm_payload:
+            logging.warning(
+                "LLM returned empty response",
+                extra={
+                    "issue_key": issue_key,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "system_prompt_preview": system_prompt[:200],
+                    "user_prompt_preview": user_prompt[:200],
+                    "error": error_msg,
+                },
+            )
             raise ConversationProcessingError(error_msg or "LLM returned empty response.")
         cost_usd = cq.estimate_cost(model, prompt_tokens, completion_tokens)
 
