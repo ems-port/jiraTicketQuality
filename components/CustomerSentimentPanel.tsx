@@ -25,7 +25,6 @@ const SENTIMENT_COLORS: Record<SentimentLabel, string> = {
   Neutral: "#94a3b8"
 };
 
-const RECENT_WINDOW_MS = 60 * 60 * 1000;
 const LINE_RANGE_HOURS: Record<TimeWindow, number> = {
   "24h": 24,
   "7d": 7 * 24,
@@ -37,6 +36,13 @@ const LINE_RANGE_LABEL: Record<TimeWindow, string> = {
   "7d": "7 days",
   "30d": "30 days"
 };
+const WINDOW_LABELS: Record<TimeWindow, string> = {
+  "24h": "Last 24 hours",
+  "7d": "Last 7 days",
+  "30d": "Last 30 days"
+};
+const LIVE_WINDOW_MS = 60 * 60 * 1000;
+type SentimentMode = "live" | "window";
 
 type CustomerSentimentPanelProps = {
   rows: ConversationRow[];
@@ -61,52 +67,61 @@ type LineTooltip = {
 };
 
 export function CustomerSentimentPanel({ rows, referenceNow, window }: CustomerSentimentPanelProps) {
-  const { recentBreakdown, recentTotal } = useMemo(() => {
-    const horizon = referenceNow.getTime() - RECENT_WINDOW_MS;
-    const counts: Record<SentimentLabel, number> = {
-      Delight: 0,
-      Convenience: 0,
-      Trust: 0,
-      Frustration: 0,
-      Disappointment: 0,
-      Concern: 0,
-      Hostility: 0,
-      Neutral: 0
-    };
-    rows.forEach((row) => {
-      const reference = row.endedAt ?? row.startedAt;
-      if (!reference || reference.getTime() < horizon) {
-        return;
-      }
-      const sentiment = row.customerSentimentPrimary ?? "Neutral";
-      counts[sentiment] += 1;
-    });
-    const total = Object.values(counts).reduce((acc, value) => acc + value, 0);
-    return { recentBreakdown: counts, recentTotal: total };
-  }, [rows, referenceNow]);
-
+  const [mode, setMode] = useState<SentimentMode>("live");
+  const windowLabel = WINDOW_LABELS[window];
+  const sentimentRows = useMemo(
+    () => filterSentimentRows(rows, mode),
+    [rows, mode]
+  );
+  const { breakdown, total } = useMemo(() => buildSentimentBreakdown(sentimentRows), [sentimentRows]);
   const timeline = useMemo(
     () => buildSentimentTimeline(rows, referenceNow, LINE_RANGE_HOURS[window]),
     [rows, referenceNow, window]
   );
+  const pieLabel = mode === "live" ? "Live last hour" : windowLabel;
 
   return (
     <section className="rounded-3xl border border-slate-800 bg-slate-900/60 p-6 shadow-inner">
       <header className="flex flex-col gap-1">
         <h2 className="text-xl font-semibold text-white">Customer Sentiment</h2>
-        <p className="text-sm text-slate-400">
-          Live mix (last 60 minutes) and hourly trends ({LINE_RANGE_LABEL[window]}).
-        </p>
+        <div className="flex flex-wrap items-center gap-3 text-sm text-slate-400">
+          <span>Sentiment mix ({pieLabel}) and hourly trends ({LINE_RANGE_LABEL[window]}).</span>
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
+            {(["live", "window"] as SentimentMode[]).map((entry) => (
+              <button
+                key={entry}
+                type="button"
+                onClick={() => setMode(entry)}
+                className={clsx(
+                  "rounded-full border px-3 py-1 transition",
+                  mode === entry
+                    ? "border-brand-500/60 bg-brand-500/20 text-brand-100"
+                    : "border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-500"
+                )}
+              >
+                {entry === "live" ? "Live 1h" : "Match window"}
+              </button>
+            ))}
+          </div>
+        </div>
       </header>
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-        <PiePanel counts={recentBreakdown} total={recentTotal} />
+        <PiePanel counts={breakdown} total={total} label={pieLabel} />
         <LinePanel timeline={timeline} />
       </div>
     </section>
   );
 }
 
-function PiePanel({ counts, total }: { counts: Record<SentimentLabel, number>; total: number }) {
+function PiePanel({
+  counts,
+  total,
+  label
+}: {
+  counts: Record<SentimentLabel, number>;
+  total: number;
+  label: string;
+}) {
   const [active, setActive] = useState<SentimentLabel | null>(null);
   const [tooltip, setTooltip] = useState<PieTooltip | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -114,7 +129,7 @@ function PiePanel({ counts, total }: { counts: Record<SentimentLabel, number>; t
   if (!total) {
     return (
       <div className="flex h-full flex-col items-center justify-center rounded-2xl border border-slate-800 bg-slate-950/50 p-4 text-sm text-slate-400">
-        Not enough data in the last hour.
+        No sentiment data for {label.toLowerCase()}.
       </div>
     );
   }
@@ -395,6 +410,36 @@ function LinePanel({ timeline }: { timeline: TimelineSeries }) {
   );
 }
 
+function buildSentimentBreakdown(rows: ConversationRow[]) {
+  const counts = createSentimentCounts();
+  rows.forEach((row) => {
+    const sentiment = normalizeSentimentLabel(row.customerSentimentPrimary);
+    counts[sentiment] += 1;
+  });
+  const total = Object.values(counts).reduce((acc, value) => acc + value, 0);
+  return { breakdown: counts, total };
+}
+
+function filterSentimentRows(rows: ConversationRow[], mode: SentimentMode): ConversationRow[] {
+  if (mode === "window") {
+    return rows;
+  }
+  const latest = findLatestReference(rows);
+  if (!latest) {
+    return [];
+  }
+  const anchor = latest.getTime();
+  const horizon = anchor - LIVE_WINDOW_MS;
+  return rows.filter((row) => {
+    const reference = row.endedAt ?? row.startedAt;
+    if (!reference) {
+      return false;
+    }
+    const timestamp = reference.getTime();
+    return timestamp >= horizon && timestamp <= anchor;
+  });
+}
+
 function buildPieSegments(counts: Record<SentimentLabel, number>, total: number) {
   let current = 0;
   return SENTIMENT_ORDER.map((label) => {
@@ -420,16 +465,7 @@ function buildSentimentTimeline(rows: ConversationRow[], referenceNow: Date, tot
     const bucketDate = new Date(alignedNow.getTime() - offset * 60 * 60 * 1000);
     buckets.push({
       bucketLabel: bucketDate.toISOString().slice(0, 13).replace("T", " ") + ":00",
-      counts: {
-        Delight: 0,
-        Convenience: 0,
-        Trust: 0,
-        Frustration: 0,
-        Disappointment: 0,
-        Concern: 0,
-        Hostility: 0,
-        Neutral: 0
-      }
+      counts: createSentimentCounts()
     });
   }
 
@@ -452,11 +488,42 @@ function buildSentimentTimeline(rows: ConversationRow[], referenceNow: Date, tot
     if (!bucket) {
       return;
     }
-    const sentiment = row.customerSentimentPrimary ?? "Neutral";
-    bucket.counts[sentiment] = (bucket.counts[sentiment] ?? 0) + 1;
+    const sentiment = normalizeSentimentLabel(row.customerSentimentPrimary);
+    bucket.counts[sentiment] += 1;
   });
 
   return { points: buckets };
+}
+
+function createSentimentCounts(): Record<SentimentLabel, number> {
+  return {
+    Delight: 0,
+    Convenience: 0,
+    Trust: 0,
+    Frustration: 0,
+    Disappointment: 0,
+    Concern: 0,
+    Hostility: 0,
+    Neutral: 0
+  };
+}
+
+function normalizeSentimentLabel(value: SentimentLabel | null): SentimentLabel {
+  if (value && SENTIMENT_ORDER.includes(value)) {
+    return value;
+  }
+  return "Neutral";
+}
+
+function findLatestReference(rows: ConversationRow[]): Date | null {
+  let latest: Date | null = null;
+  rows.forEach((row) => {
+    const reference = row.endedAt ?? row.startedAt;
+    if (reference && (!latest || reference.getTime() > latest.getTime())) {
+      latest = reference;
+    }
+  });
+  return latest;
 }
 
 function describeArc(cx: number, cy: number, radius: number, startAngle: number, endAngle: number) {

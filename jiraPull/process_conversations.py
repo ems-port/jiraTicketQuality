@@ -43,6 +43,15 @@ def extract_error_code(error: Any) -> Optional[str]:
     return getattr(error, "code", None)
 
 
+def resolve_default_model() -> str:
+    explicit = os.getenv("PORT_CONVO_MODEL")
+    if explicit:
+        return explicit
+    if os.getenv("VERCEL") == "1":
+        return "gpt-4o-mini"
+    return "gpt-5-nano"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Pull prepared Jira conversations from Supabase, run convo quality, and persist the results."
@@ -50,8 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=200, help="Max number of conversations to process.")
     parser.add_argument(
         "--model",
-        default=os.getenv("PORT_CONVO_MODEL", "gpt-4o-mini"),
-        help="LLM model identifier (default: gpt-5-nano).",
+        default=resolve_default_model(),
+        help="LLM model identifier (local builds default to gpt-5-nano).",
     )
     parser.add_argument("--temperature", type=float, default=0.2, help="LLM temperature (if supported by model).")
     parser.add_argument("--max-output-tokens", type=int, default=8000, help="LLM max completion tokens.")

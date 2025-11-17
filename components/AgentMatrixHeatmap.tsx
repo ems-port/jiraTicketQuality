@@ -134,10 +134,10 @@ export function AgentMatrixHeatmap({
                 <td className="px-4 py-3 text-brand-200 font-semibold">
                   {formatScore(row.avgAgentScore)}
                 </td>
+                <td className="px-4 py-3 text-slate-200">{formatTicketCount(row.ticketCount)}</td>
                 <td className="px-4 py-3" style={{ background: heatmap(row.avgFirstResponseMinutes, maxFirst, true) }}>
                   {formatNumber(row.avgFirstResponseMinutes)}
                 </td>
-                <td className="px-4 py-3 text-slate-200">{row.ticketCount}</td>
                 <td className="px-4 py-3" style={{ background: heatmap(row.avgAgentResponseMinutes, maxAvg, true) }}>
                   {formatNumber(row.avgAgentResponseMinutes)}
                 </td>
@@ -238,10 +238,18 @@ function formatScore(value: number | null): string {
   return value.toFixed(2);
 }
 
+function formatTicketCount(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+  return Math.max(0, value).toLocaleString();
+}
+
 function columns(metric: EscalationMetricKind) {
   return [
     { key: "agent", label: "Agent" },
     { key: "avgAgentScore", label: "Avg Agent Score" },
+    { key: "ticketCount", label: "Tickets" },
     { key: "avgFirstResponseMinutes", label: "Avg First Response (min)" },
     { key: "avgAgentResponseMinutes", label: "Avg Agent Response (min)" },
     { key: "avgResolutionDurationMinutes", label: "Avg Duration to Resolution" },
@@ -250,8 +258,7 @@ function columns(metric: EscalationMetricKind) {
       key: "escalatedCount",
       label: metric === "tier" ? "Escalation T1→T2" : "Handovers T1→Any"
     },
-    { key: "misclassifiedCount", label: "Misclassified %" },
-    { key: "ticketCount", label: "Tickets" }
+    { key: "misclassifiedCount", label: "Misclassified %" }
   ] as const;
 }
 

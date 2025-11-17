@@ -15,6 +15,7 @@ import { ManagerReviewPanel } from "@/components/ManagerReviewPanel";
 import { TipsOfTheDayPanel } from "@/components/TipsOfTheDayPanel";
 import { SettingsDrawer } from "@/components/SettingsDrawer";
 import { TipsDrilldownModal } from "@/components/TipsDrilldownModal";
+import { TicketVolumePanel } from "@/components/TicketVolumePanel";
 import { ToxicityList } from "@/components/ToxicityList";
 import { resolveDisplayName } from "@/lib/displayNames";
 import {
@@ -102,6 +103,11 @@ type DrilldownState = {
   rows: ConversationRow[];
 } | null;
 
+type LatestTicketInfo = {
+  key: string;
+  dateLabel: string | null;
+};
+
 export default function DashboardPage({
   initialAgentDirectory = {},
   initialAgentOrder = []
@@ -139,6 +145,7 @@ export default function DashboardPage({
   const [isManagerReviewOpen, setIsManagerReviewOpen] = useState(false);
   const [useOnlineData, setUseOnlineData] = useState(true);
   const [refreshState, setRefreshState] = useState<RefreshJobState>(DEFAULT_REFRESH_STATE);
+  const [latestOnlineTicket, setLatestOnlineTicket] = useState<LatestTicketInfo | null>(null);
   const initialLoadAttemptedRef = useRef(false);
   const initialRoleLoadAttemptedRef = useRef(false);
   const lastRefreshCompletionRef = useRef<number | null>(null);
@@ -198,6 +205,7 @@ export default function DashboardPage({
       }
       setRows(normalised, { sampleData: false });
       setFileName("Supabase Live DB");
+      setLatestOnlineTicket(computeLatestTicketInfo(normalised));
     } catch (error) {
       setFileError((error as Error).message ?? "Unable to load online data.");
     }
@@ -411,15 +419,12 @@ export default function DashboardPage({
   }, [sourceRows, searchTerm, agentFilter, roleFilter, hubFilter, roleMapping]);
 
   const referenceNow = useMemo(() => {
-    let latest: Date | null = null;
-    sourceRows.forEach((row) => {
-      const candidate = row.endedAt ?? row.startedAt;
-      if (candidate && (!latest || candidate.getTime() > latest.getTime())) {
-        latest = candidate;
-      }
-    });
-    return latest ? new Date(latest) : new Date();
-  }, [sourceRows]);
+    if (!sampleDataActive) {
+      return new Date();
+    }
+    const latestReference = resolveLatestReferenceDate(sourceRows);
+    return latestReference ? new Date(latestReference) : new Date();
+  }, [sourceRows, sampleDataActive]);
 
   const filteredRows = useMemo(
     () => filterByWindow(attributeFilteredRows, selectedWindow, referenceNow),
@@ -766,33 +771,11 @@ export default function DashboardPage({
   );
 
   const conversationCount = filteredRows.length;
-  const latestTicket = useMemo(() => {
-    if (!sourceRows.length) {
-      return null;
-    }
-    let latestRow: ConversationRow | null = null;
-    let latestTime = 0;
-    sourceRows.forEach((row) => {
-      const reference = row.endedAt ?? row.startedAt;
-      if (!reference) {
-        return;
-      }
-      const time = reference.getTime();
-      if (!latestRow || time > latestTime) {
-        latestRow = row;
-        latestTime = time;
-      }
-    });
-    if (!latestRow) {
-      return null;
-    }
-    const finalRow: ConversationRow = latestRow;
-    const reference = finalRow.endedAt ?? finalRow.startedAt ?? null;
-    return {
-      key: finalRow.issueKey,
-      dateLabel: formatShortDate(reference)
-    };
-  }, [sourceRows]);
+  const datasetLatestTicket = useMemo(() => computeLatestTicketInfo(sourceRows), [sourceRows]);
+  const latestTicket = useMemo(
+    () => latestOnlineTicket ?? datasetLatestTicket,
+    [latestOnlineTicket, datasetLatestTicket]
+  );
 
   const lastRefreshTimestamp = refreshState.lastCompletedAt ?? lastRefreshCompletionRef.current ?? null;
   const needsDataRefresh =
@@ -1127,6 +1110,7 @@ export default function DashboardPage({
               referenceNow={referenceNow}
               window={selectedWindow}
             />
+            <TicketVolumePanel rows={filteredRows} referenceNow={referenceNow} window={selectedWindow} />
 
             <ContactReasonPanel
               summary={contactReasonSummary}
@@ -1225,12 +1209,18 @@ function formatShortDate(date: Date | null): string | null {
   if (!date) {
     return null;
   }
-  return date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const month = months[date.getUTCMonth()];
+  const day = date.getUTCDate();
+  let hours = date.getUTCHours();
+  const minutes = date.getUTCMinutes();
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12;
+  if (hours === 0) {
+    hours = 12;
+  }
+  const paddedMinutes = minutes.toString().padStart(2, "0");
+  return `${month} ${day}, ${hours}:${paddedMinutes} ${ampm} UTC`;
 }
 
 function formatEta(seconds: number): string {
@@ -1259,6 +1249,44 @@ function formatRelativeTime(timestamp: number): string {
   }
   const days = Math.round(diff / 86_400_000);
   return `${days}d ago`;
+}
+
+function resolveLatestReferenceDate(rows: ConversationRow[]): Date | null {
+  let latest: Date | null = null;
+  rows.forEach((row) => {
+    const candidate = row.endedAt ?? row.startedAt;
+    if (candidate && (!latest || candidate.getTime() > latest.getTime())) {
+      latest = candidate;
+    }
+  });
+  return latest;
+}
+
+function computeLatestTicketInfo(rows: ConversationRow[]): LatestTicketInfo | null {
+  if (!rows.length) {
+    return null;
+  }
+  let latestRow: ConversationRow | null = null;
+  let latestTime = 0;
+  rows.forEach((row) => {
+    const reference = row.endedAt ?? row.startedAt;
+    if (!reference) {
+      return;
+    }
+    const time = reference.getTime();
+    if (!latestRow || time > latestTime) {
+      latestRow = row;
+      latestTime = time;
+    }
+  });
+  if (!latestRow) {
+    return null;
+  }
+  const reference = latestRow.endedAt ?? latestRow.startedAt ?? null;
+  return {
+    key: latestRow.issueKey,
+    dateLabel: formatShortDate(reference)
+  };
 }
 
 function StatusIcon({ state }: { state: "running" | "done" | "error" | "idle" }) {
