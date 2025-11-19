@@ -787,6 +787,8 @@ export default function DashboardPage({
   const unresolvedFooterText = selectedResolvedStats.total
     ? `${unresolvedCount.toLocaleString()} of ${selectedResolvedStats.total.toLocaleString()} not resolved`
     : "No tickets in this window";
+  const misclassifiedFeedbackEnabled =
+    (drilldownState?.metricLabel ?? "").toLowerCase().includes("misclassified");
 
   return (
     <main className="min-h-screen bg-slate-950 pb-16">
@@ -1166,6 +1168,7 @@ export default function DashboardPage({
         agentMapping={agentNameMap}
         deAnonymize={deAnonymize}
         roleMapping={roleMapping}
+        feedbackEnabled={misclassifiedFeedbackEnabled}
       />
 
       <TipsDrilldownModal

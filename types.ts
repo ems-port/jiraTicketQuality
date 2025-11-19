@@ -76,6 +76,20 @@ export interface ConversationRow {
   raw: Record<string, unknown>;
 }
 
+export type FeedbackVerdict = "up" | "down";
+
+export interface MisclassifiedFeedbackSummary {
+  issueKey: string;
+  upCount: number;
+  downCount: number;
+  entries: number;
+  lastUpdatedAt: string | null;
+  lastUpdatedBy: string | null;
+  userVerdict: FeedbackVerdict | null;
+  userNotes: string | null;
+  userDisplayName: string | null;
+}
+
 export interface MetricSeries {
   window: TimeWindow;
   value: number | null;
