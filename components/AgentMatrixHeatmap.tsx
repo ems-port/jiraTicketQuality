@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import clsx from "clsx";
 
 import { DisplayName } from "@/components/DisplayName";
 import { resolveAgentRole } from "@/lib/roles";
@@ -98,7 +99,13 @@ export function AgentMatrixHeatmap({
           <thead className="bg-slate-900/50 text-xs uppercase tracking-wide text-slate-400">
             <tr>
               {columns(escalationMetric).map((column) => (
-                <th key={column.key} className="px-4 py-3 text-left font-semibold">
+                <th
+                  key={column.key}
+                  className={clsx(
+                    "px-4 py-3 text-left font-semibold",
+                    column.key === "agent" && "sticky left-0 z-20 bg-slate-900/90 backdrop-blur"
+                  )}
+                >
                   <button
                     type="button"
                     onClick={() => handleSort(column.key)}
@@ -120,7 +127,7 @@ export function AgentMatrixHeatmap({
           <tbody className="divide-y divide-slate-800/70">
             {sortedRows.map((row) => (
               <tr key={row.agent} className="hover:bg-slate-900/40">
-                <td className="px-4 py-3 font-semibold text-white">
+                <td className="sticky left-0 z-10 border-r border-slate-900/60 bg-slate-950/90 px-4 py-3 font-semibold text-white backdrop-blur">
                   <DisplayName
                     id={row.agent}
                     mapping={mapping}
