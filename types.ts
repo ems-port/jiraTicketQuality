@@ -76,16 +76,16 @@ export interface ConversationRow {
   raw: Record<string, unknown>;
 }
 
-export type FeedbackVerdict = "up" | "down";
+export type MisclassificationVerdict = "up" | "down";
 
-export interface MisclassifiedFeedbackSummary {
+export interface MisclassificationReviewSummary {
   issueKey: string;
   upCount: number;
   downCount: number;
   entries: number;
   lastUpdatedAt: string | null;
   lastUpdatedBy: string | null;
-  userVerdict: FeedbackVerdict | null;
+  userVerdict: MisclassificationVerdict | null;
   userNotes: string | null;
   userDisplayName: string | null;
 }

@@ -1,0 +1,36 @@
+name: Trigger Jira refresh
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+env:
+  BASE_URL: https://jira-ticket-quality.vercel.app
+
+jobs:
+  trigger-refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger /api/ingest
+        env:
+          REFRESH_CRON_SECRET: ${{ secrets.REFRESH_CRON_SECRET }}
+        run: |
+          if [ -z "$REFRESH_CRON_SECRET" ]; then
+            echo "::error::Missing REFRESH_CRON_SECRET repository secret."
+            exit 1
+          fi
+          curl -fsS -X POST "$BASE_URL/api/ingest" \
+            -H "Authorization: Bearer $REFRESH_CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            || exit 1
+
+      - name: Trigger /api/process
+        env:
+          REFRESH_CRON_SECRET: ${{ secrets.REFRESH_CRON_SECRET }}
+        run: |
+          curl -fsS -X POST "$BASE_URL/api/process" \
+            -H "Authorization: Bearer $REFRESH_CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{"limit":50}' \
+            || exit 1

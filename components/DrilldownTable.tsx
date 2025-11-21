@@ -7,9 +7,14 @@ import { DisplayName } from "@/components/DisplayName";
 import { formatDateTimeLocal } from "@/lib/date";
 import { resolveDisplayName } from "@/lib/displayNames";
 import { resolveAgentRole } from "@/lib/roles";
-import { ensureFeedbackIdentity, persistFeedbackDisplayName } from "@/lib/feedbackIdentity";
-import type { FeedbackIdentity } from "@/lib/feedbackIdentity";
-import { AgentRole, ConversationRow, FeedbackVerdict, MisclassifiedFeedbackSummary } from "@/types";
+import { ensureReviewIdentity, persistReviewDisplayName } from "@/lib/reviewIdentity";
+import type { ReviewIdentity } from "@/lib/reviewIdentity";
+import {
+  AgentRole,
+  ConversationRow,
+  MisclassificationVerdict,
+  MisclassificationReviewSummary
+} from "@/types";
 
 const JIRA_BASE_URL = "https://portapp.atlassian.net/browse/";
 
@@ -50,7 +55,8 @@ type DrilldownTableProps = {
   agentMapping: Record<string, string>;
   deAnonymize: boolean;
   roleMapping: Record<string, AgentRole>;
-  feedbackEnabled?: boolean;
+  reviewEnabled?: boolean;
+  initialAgentFilter?: string | null;
 };
 
 type TableRow = {
@@ -72,28 +78,22 @@ type TableRow = {
   resolutionWhy: string;
 };
 
-type FeedbackDialogState = {
+type ReviewDialogState = {
   issueKey: string;
-  verdict: FeedbackVerdict;
+  verdict: MisclassificationVerdict;
 };
 
-const FEEDBACK_NOTES_LIMIT = 1000;
+const REVIEW_NOTES_LIMIT = 1000;
 
-const HEADERS: { key: SortKey; label: string }[] = [
-  { key: "issueKey", label: "Issue Key" },
-  { key: "agentLabel", label: "Agent" },
-  { key: "customerLabel", label: "Customer" },
-  { key: "ticketSummary", label: "Ticket summary" },
-  { key: "resolved", label: "Resolved" },
-  { key: "contactReasonOriginal", label: "Original contact reason" },
-  { key: "contactReason", label: "Corrected contact reason" },
-  { key: "reasonOverride", label: "Reason to change" },
-  { key: "agentScore", label: "Agent Score" },
-  { key: "customerScore", label: "Customer Score" },
-  { key: "sentiment", label: "Customer sentiment" },
-  { key: "resolutionWhy", label: "Resolution summary" },
-  { key: "improvementTip", label: "Improvement tip" }
-];
+type ColumnDescriptor = {
+  key: SortKey | "review";
+  label: string;
+  sortable?: boolean;
+  sticky?: "left" | "right";
+  render: (row: TableRow) => React.ReactNode;
+  headerAlign?: "left" | "right" | "center";
+  cellClassName?: (row: TableRow) => string;
+};
 
 export function DrilldownTable({
   open,
@@ -104,7 +104,8 @@ export function DrilldownTable({
   agentMapping,
   deAnonymize,
   roleMapping,
-  feedbackEnabled = false
+  reviewEnabled = false,
+  initialAgentFilter = null
 }: DrilldownTableProps) {
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "issueKey",
@@ -140,25 +141,121 @@ export function DrilldownTable({
     [rows, mapping, deAnonymize, roleMapping]
   );
 
+  const [agentFilter, setAgentFilter] = useState<string>(initialAgentFilter ?? "all");
+  const [agentFilterManuallySet, setAgentFilterManuallySet] = useState(false);
+  const [compactReviewView, setCompactReviewView] = useState(true);
+
+  const agentCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    tableRows.forEach((row) => {
+      counts.set(row.agentId, (counts.get(row.agentId) ?? 0) + 1);
+    });
+    return counts;
+  }, [tableRows]);
+
+  const agentOptions = useMemo(() => {
+    const ids = new Set<string>();
+    Object.keys(agentMapping || {}).forEach((id) => {
+      if (id) {
+        ids.add(id);
+      }
+    });
+    tableRows.forEach((row) => ids.add(row.agentId));
+    return Array.from(ids)
+      .map((id) => {
+        const display = resolveDisplayName(id, mapping, deAnonymize, agentMapping);
+        const count = agentCounts.get(id) ?? 0;
+        const label = display.label || id;
+        return { value: id, label: `${label} (${count})`, rawLabel: label, count };
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [agentMapping, tableRows, mapping, deAnonymize, agentCounts]);
+
+  const agentsInRows = useMemo(() => {
+    const ids = new Set<string>();
+    tableRows.forEach((row) => ids.add(row.agentId));
+    return Array.from(ids);
+  }, [tableRows]);
+
+  useEffect(() => {
+    if (!reviewEnabled) {
+      if (agentFilter !== "all") {
+        setAgentFilter("all");
+        setAgentFilterManuallySet(false);
+      }
+      if (compactReviewView) {
+        setCompactReviewView(false);
+      }
+      return;
+    }
+
+    if (!agentOptions.length) {
+      if (agentFilter !== "all") {
+        setAgentFilter("all");
+        setAgentFilterManuallySet(false);
+      }
+      return;
+    }
+
+    if (agentFilter !== "all" && !agentOptions.some((option) => option.value === agentFilter)) {
+      setAgentFilter("all");
+      setAgentFilterManuallySet(false);
+      return;
+    }
+
+    if (!agentFilterManuallySet && agentFilter === "all") {
+      if (initialAgentFilter && agentOptions.some((option) => option.value === initialAgentFilter)) {
+        setAgentFilter(initialAgentFilter);
+        return;
+      }
+      if (agentsInRows.length === 1) {
+        setAgentFilter(agentsInRows[0]);
+      }
+    }
+  }, [
+    reviewEnabled,
+    agentOptions,
+    agentFilter,
+    compactReviewView,
+    agentsInRows,
+    initialAgentFilter,
+    agentFilterManuallySet
+  ]);
+
+  const filteredRows = useMemo(() => {
+    if (reviewEnabled && agentFilter !== "all") {
+      return tableRows.filter((row) => row.agentId === agentFilter);
+    }
+    return tableRows;
+  }, [tableRows, reviewEnabled, agentFilter]);
+
   const sortedRows = useMemo(() => {
-    const sorted = [...tableRows];
+    const sorted = [...filteredRows];
     const { key, direction } = sortConfig;
     sorted.sort((a, b) => compareRows(a, b, key, direction));
     return sorted;
-  }, [tableRows, sortConfig]);
+  }, [filteredRows, sortConfig]);
 
   const [downloadHref, setDownloadHref] = useState<string | null>(null);
-  const [feedbackIdentity, setFeedbackIdentity] = useState<FeedbackIdentity | null>(null);
-  const [feedbackSummaries, setFeedbackSummaries] = useState<
-    Record<string, MisclassifiedFeedbackSummary>
+  const [reviewIdentity, setReviewIdentity] = useState<ReviewIdentity | null>(null);
+  const [reviewSummaries, setReviewSummaries] = useState<
+    Record<string, MisclassificationReviewSummary>
   >({});
-  const [feedbackLoading, setFeedbackLoading] = useState(false);
-  const [feedbackError, setFeedbackError] = useState<string | null>(null);
-  const [feedbackDialog, setFeedbackDialog] = useState<FeedbackDialogState | null>(null);
-  const [feedbackNotes, setFeedbackNotes] = useState("");
-  const [feedbackDisplayName, setFeedbackDisplayName] = useState("");
-  const [feedbackSubmitError, setFeedbackSubmitError] = useState<string | null>(null);
-  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewDialog, setReviewDialog] = useState<ReviewDialogState | null>(null);
+  const [reviewNotes, setReviewNotes] = useState("");
+  const [reviewDisplayName, setReviewDisplayName] = useState("");
+  const [reviewSubmitError, setReviewSubmitError] = useState<string | null>(null);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const previousReviewEnabled = useRef(reviewEnabled);
+
+  useEffect(() => {
+    if (!previousReviewEnabled.current && reviewEnabled) {
+      setCompactReviewView(true);
+    }
+    previousReviewEnabled.current = reviewEnabled;
+  }, [reviewEnabled]);
 
   useEffect(() => {
     if (!open || !sortedRows.length) {
@@ -196,41 +293,41 @@ export function DrilldownTable({
   }, [open, sortedRows]);
 
   useEffect(() => {
-    if (!open || !feedbackEnabled) {
-      setFeedbackSummaries({});
-      setFeedbackError(null);
+    if (!open || !reviewEnabled) {
+      setReviewSummaries({});
+      setReviewError(null);
       return;
     }
     if (typeof window === "undefined") {
       return;
     }
-    const identity = ensureFeedbackIdentity();
-    setFeedbackIdentity(identity);
+    const identity = ensureReviewIdentity();
+    setReviewIdentity(identity);
 
     const issueKeys = Array.from(new Set(tableRows.map((row) => row.issueKey)));
     if (!issueKeys.length) {
-      setFeedbackSummaries({});
-      setFeedbackError(null);
+      setReviewSummaries({});
+      setReviewError(null);
       return;
     }
 
     let cancelled = false;
-    setFeedbackLoading(true);
-    setFeedbackError(null);
+    setReviewLoading(true);
+    setReviewError(null);
 
     const load = async () => {
       try {
-        const summaries = await requestFeedbackSummaries(issueKeys, identity?.id);
+        const summaries = await requestReviewSummaries(issueKeys, identity?.id);
         if (!cancelled) {
-          setFeedbackSummaries(summaries);
+          setReviewSummaries(summaries);
         }
       } catch (error) {
         if (!cancelled) {
-          setFeedbackError((error as Error).message ?? "Unable to load feedback.");
+          setReviewError((error as Error).message ?? "Unable to load reviews.");
         }
       } finally {
         if (!cancelled) {
-          setFeedbackLoading(false);
+          setReviewLoading(false);
         }
       }
     };
@@ -239,11 +336,7 @@ export function DrilldownTable({
     return () => {
       cancelled = true;
     };
-  }, [open, feedbackEnabled, tableRows]);
-
-  if (!open) {
-    return null;
-  }
+  }, [open, reviewEnabled, tableRows]);
 
   const handleSort = (column: SortKey) => {
     setSortConfig((current) => {
@@ -255,59 +348,64 @@ export function DrilldownTable({
     });
   };
 
-  const handleFeedbackClick = (issueKey: string, verdict: FeedbackVerdict) => {
-    if (!feedbackEnabled) {
+  const handleAgentFilterChange = (value: string) => {
+    setAgentFilter(value);
+    setAgentFilterManuallySet(true);
+  };
+
+  const handleReviewClick = (issueKey: string, verdict: MisclassificationVerdict) => {
+    if (!reviewEnabled) {
       return;
     }
-    const identity = feedbackIdentity ?? ensureFeedbackIdentity();
+    const identity = reviewIdentity ?? ensureReviewIdentity();
     if (!identity) {
       return;
     }
-    if (!feedbackIdentity) {
-      setFeedbackIdentity(identity);
+    if (!reviewIdentity) {
+      setReviewIdentity(identity);
     }
-    const summary = feedbackSummaries[issueKey];
+    const summary = reviewSummaries[issueKey];
     const existingNotes = summary?.userNotes ?? "";
-    setFeedbackNotes(existingNotes.slice(0, FEEDBACK_NOTES_LIMIT));
+    setReviewNotes(existingNotes.slice(0, REVIEW_NOTES_LIMIT));
     const fallbackName = summary?.userDisplayName ?? identity.displayName ?? "";
-    setFeedbackDisplayName(fallbackName.slice(0, 120));
-    setFeedbackSubmitError(null);
-    setFeedbackDialog({ issueKey, verdict });
+    setReviewDisplayName(fallbackName.slice(0, 120));
+    setReviewSubmitError(null);
+    setReviewDialog({ issueKey, verdict });
   };
 
-  const handleFeedbackClose = () => {
-    setFeedbackDialog(null);
-    setFeedbackSubmitError(null);
-    setFeedbackNotes("");
+  const handleReviewClose = () => {
+    setReviewDialog(null);
+    setReviewSubmitError(null);
+    setReviewNotes("");
   };
 
-  const handleFeedbackSubmit = async () => {
-    if (!feedbackDialog) {
+  const handleReviewSubmit = async () => {
+    if (!reviewDialog) {
       return;
     }
-    const identity = feedbackIdentity ?? ensureFeedbackIdentity();
+    const identity = reviewIdentity ?? ensureReviewIdentity();
     if (!identity) {
-      setFeedbackSubmitError("Unable to resolve your browser identity.");
+      setReviewSubmitError("Unable to resolve your browser identity.");
       return;
     }
-    if (!feedbackIdentity) {
-      setFeedbackIdentity(identity);
+    if (!reviewIdentity) {
+      setReviewIdentity(identity);
     }
 
-    const trimmedNotes = feedbackNotes.trim().slice(0, FEEDBACK_NOTES_LIMIT);
+    const trimmedNotes = reviewNotes.trim().slice(0, REVIEW_NOTES_LIMIT);
     const safeNotes = trimmedNotes.length ? trimmedNotes : "";
-    const trimmedName = feedbackDisplayName.trim().slice(0, 120);
+    const trimmedName = reviewDisplayName.trim().slice(0, 120);
     const fingerprint = getBrowserFingerprint() ?? identity.id;
 
-    setFeedbackSubmitting(true);
-    setFeedbackSubmitError(null);
+    setReviewSubmitting(true);
+    setReviewSubmitError(null);
     try {
-      const response = await fetch("/api/misclassified-feedback", {
+      const response = await fetch("/api/misclassification-reviews", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          issueKey: feedbackDialog.issueKey,
-          verdict: feedbackDialog.verdict,
+          issueKey: reviewDialog.issueKey,
+          verdict: reviewDialog.verdict,
           notes: safeNotes,
           userId: identity.id,
           userDisplay: trimmedName,
@@ -315,9 +413,9 @@ export function DrilldownTable({
         })
       });
 
-      let payload: FeedbackSummariesResponse | { error?: string } | null = null;
+      let payload: ReviewSummariesResponse | { error?: string } | null = null;
       try {
-        payload = (await response.json()) as FeedbackSummariesResponse | { error?: string } | null;
+        payload = (await response.json()) as ReviewSummariesResponse | { error?: string } | null;
       } catch {
         payload = null;
       }
@@ -326,41 +424,293 @@ export function DrilldownTable({
         const message =
           (payload && "error" in (payload as Record<string, unknown>)
             ? ((payload as { error?: string }).error ?? null)
-            : null) ?? `Unable to save feedback (${response.status}).`;
+            : null) ?? `Unable to save review (${response.status}).`;
         throw new Error(message);
       }
 
-      const summaries = (payload as FeedbackSummariesResponse | null)?.summaries ?? {};
-      setFeedbackSummaries((prev) => ({ ...prev, ...summaries }));
-      const updatedIdentity = persistFeedbackDisplayName(trimmedName);
+      const summaries = (payload as ReviewSummariesResponse | null)?.summaries ?? {};
+      setReviewSummaries((prev) => ({ ...prev, ...summaries }));
+      const updatedIdentity = persistReviewDisplayName(trimmedName);
       if (updatedIdentity) {
-        setFeedbackIdentity(updatedIdentity);
-        setFeedbackDisplayName(updatedIdentity.displayName ?? "");
+        setReviewIdentity(updatedIdentity);
+        setReviewDisplayName(updatedIdentity.displayName ?? "");
       }
-      setFeedbackDialog(null);
-      setFeedbackNotes("");
+      setReviewDialog(null);
+      setReviewNotes("");
     } catch (error) {
-      setFeedbackSubmitError((error as Error).message ?? "Unable to save feedback.");
+      setReviewSubmitError((error as Error).message ?? "Unable to save review.");
     } finally {
-      setFeedbackSubmitting(false);
+      setReviewSubmitting(false);
     }
   };
 
-  const columnCount = HEADERS.length + (feedbackEnabled ? 1 : 0);
-  const activeFeedbackSummary = feedbackDialog ? feedbackSummaries[feedbackDialog.issueKey] : undefined;
+  const columns = useMemo<ColumnDescriptor[]>(() => {
+    const defaultColumns: ColumnDescriptor[] = [
+      {
+        key: "issueKey",
+        label: "Issue Key",
+        sortable: true,
+        sticky: "left",
+        cellClassName: () => "min-w-[9rem]",
+        render: (row) => (
+          <a
+            href={`${JIRA_BASE_URL}${row.issueKey}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-brand-200 underline decoration-brand-600 hover:text-brand-100"
+          >
+            {row.issueKey}
+          </a>
+        )
+      },
+      {
+        key: "agentLabel",
+        label: "Agent",
+        sortable: true,
+        render: (row) => (
+          <DisplayName
+            id={row.agentId}
+            mapping={mapping}
+            agentMapping={agentMapping}
+            deAnonymize={deAnonymize}
+            titlePrefix="Agent ID"
+            showRole={true}
+            role={row.agentRole}
+          />
+        )
+      },
+      {
+        key: "customerLabel",
+        label: "Customer",
+        sortable: true,
+        render: (row) => (
+          <DisplayName
+            id={row.customerId}
+            mapping={mapping}
+            deAnonymize={deAnonymize}
+            titlePrefix="Customer ID"
+          />
+        )
+      },
+      {
+        key: "ticketSummary",
+        label: "Ticket summary",
+        sortable: true,
+        cellClassName: () => "min-w-[22rem] max-w-[28rem]",
+        render: (row) => <TruncatedText value={row.ticketSummary} />
+      },
+      {
+        key: "resolved",
+        label: "Resolved",
+        sortable: true,
+        render: (row) =>
+          row.resolved ? (
+            <span className="text-emerald-300">Yes</span>
+          ) : (
+            <span
+              className="text-amber-300"
+              title={row.resolutionWhy ? `Resolution summary: ${row.resolutionWhy}` : undefined}
+            >
+              No
+            </span>
+          )
+      },
+      {
+        key: "contactReasonOriginal",
+        label: "Original contact reason",
+        sortable: true,
+        render: (row) => (
+          <span className="inline-flex max-w-[8rem] items-center gap-2 rounded-full border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-100">
+            <span className="h-2 w-2 rounded-full bg-amber-300" />
+            <span className="min-w-0 flex-1">
+              <TruncatedText value={row.contactReasonOriginal} truncate />
+            </span>
+          </span>
+        )
+      },
+      {
+        key: "contactReason",
+        label: "Corrected contact reason",
+        sortable: true,
+        render: (row) => (
+          <span className="inline-flex max-w-[8rem] items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-100">
+            <span className="h-2 w-2 rounded-full bg-emerald-300" />
+            <span className="min-w-0 flex-1">
+              <TruncatedText value={row.contactReason} truncate />
+            </span>
+          </span>
+        )
+      },
+      {
+        key: "reasonOverride",
+        label: "Reason to change",
+        sortable: true,
+        cellClassName: () => "min-w-[18rem] max-w-[26rem]",
+        render: (row) => <TruncatedText value={row.reasonOverride || "—"} />
+      },
+      {
+        key: "agentScore",
+        label: "Agent Score",
+        sortable: true,
+        render: (row) => formatNumber(row.agentScore)
+      },
+      {
+        key: "customerScore",
+        label: "Customer Score",
+        sortable: true,
+        render: (row) => formatNumber(row.customerScore)
+      },
+      {
+        key: "sentiment",
+        label: "Customer sentiment",
+        sortable: true,
+        render: (row) => (
+          <span
+            className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-semibold ${sentimentBadgeClass(row.sentiment)}`}
+          >
+            <span className="h-2 w-2 rounded-full bg-current opacity-80" />
+            {row.sentiment}
+          </span>
+        )
+      },
+      {
+        key: "resolutionWhy",
+        label: "Resolution summary",
+        sortable: true,
+        cellClassName: () => "min-w-[18rem] max-w-[26rem]",
+        render: (row) => <TruncatedText value={row.resolutionWhy} />
+      },
+      {
+        key: "improvementTip",
+        label: "Improvement tip",
+        sortable: true,
+        render: (row) => <TruncatedText value={row.improvementTip} />
+      }
+    ];
+
+    const compactOrder: SortKey[] = [
+      "issueKey",
+      "ticketSummary",
+      "contactReasonOriginal",
+      "contactReason",
+      "reasonOverride",
+      "resolutionWhy"
+    ];
+
+    const compactColumns = compactOrder
+      .map((key) => defaultColumns.find((column) => column.key === key))
+      .filter((column): column is ColumnDescriptor => Boolean(column));
+
+    const selectedColumns = compactReviewView ? compactColumns : defaultColumns;
+
+    if (!reviewEnabled) {
+      return selectedColumns;
+    }
+
+    const reviewColumn: ColumnDescriptor = {
+      key: "review",
+      label: "Review",
+      sortable: false,
+      sticky: "right",
+      render: (row) => {
+        const summary = reviewSummaries[row.issueKey];
+        return (
+          <div className="flex items-center gap-3">
+            <ReviewButton
+              verdict="up"
+              summary={summary}
+              disabled={reviewLoading}
+              onClick={() => handleReviewClick(row.issueKey, "up")}
+            />
+            <ReviewButton
+              verdict="down"
+              summary={summary}
+              disabled={reviewLoading}
+              onClick={() => handleReviewClick(row.issueKey, "down")}
+            />
+          </div>
+        );
+      }
+    };
+
+    return [...selectedColumns, reviewColumn];
+  }, [
+    agentMapping,
+    compactReviewView,
+    deAnonymize,
+    handleReviewClick,
+    mapping,
+    reviewEnabled,
+    reviewLoading,
+    reviewSummaries
+  ]);
+
+  const columnCount = columns.length;
+  const activeReviewSummary = reviewDialog ? reviewSummaries[reviewDialog.issueKey] : undefined;
+  const selectedAgentOption =
+    reviewEnabled && agentFilter !== "all"
+      ? agentOptions.find((option) => option.value === agentFilter)
+      : null;
+  const headerLabel =
+    reviewEnabled && selectedAgentOption
+      ? `${metricLabel.split(":")[0].trim() || metricLabel}: ${selectedAgentOption.rawLabel}`
+      : metricLabel;
+
+  if (!open) {
+    return null;
+  }
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/90 backdrop-blur">
       <div className="flex max-h-[90vh] min-h-[60vh] w-[min(1200px,96vw)] flex-col overflow-visible rounded-3xl border border-slate-800 bg-slate-950/95 shadow-2xl">
         <header className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
           <div>
-            <h2 className="text-lg font-semibold text-white">{metricLabel}</h2>
+            <h2 className="text-lg font-semibold text-white">{headerLabel}</h2>
             <p className="text-xs text-slate-400">
               Showing {sortedRows.length.toLocaleString()} conversation
               {sortedRows.length === 1 ? "" : "s"} in the current filters.
             </p>
+            {reviewEnabled && agentOptions.length > 0 && (
+              <label className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-300">
+                Agent filter
+                <select
+                  value={agentFilter}
+                  onChange={(event) => handleAgentFilterChange(event.target.value)}
+                  className="rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1 text-sm text-white focus:border-brand-500 focus:outline-none"
+                >
+                  <option value="all">All agents</option>
+                  {agentOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
           </div>
           <div className="flex items-center gap-3">
+            {reviewEnabled && (
+              <label className="flex items-center gap-3 text-sm text-slate-300">
+                <span>Review metric view</span>
+                <button
+                  type="button"
+                  onClick={() => setCompactReviewView((previous) => !previous)}
+                  className={clsx(
+                    "relative inline-flex h-7 w-12 items-center rounded-full transition",
+                    compactReviewView ? "bg-brand-500/70" : "bg-slate-700"
+                  )}
+                  role="switch"
+                  aria-checked={compactReviewView}
+                >
+                  <span
+                    className={clsx(
+                      "h-5 w-5 rounded-full bg-white shadow transition-transform",
+                      compactReviewView ? "translate-x-5" : "translate-x-1"
+                    )}
+                  />
+                </button>
+              </label>
+            )}
             {downloadHref && (
               <a
                 href={downloadHref}
@@ -383,150 +733,75 @@ export function DrilldownTable({
           <table className="min-w-full divide-y divide-slate-800 text-sm">
             <thead className="bg-slate-900/60 text-xs uppercase tracking-wide text-slate-400">
               <tr>
-                {HEADERS.map((column) => (
-                  <th
-                    key={column.key}
-                    className="px-4 py-3 text-left font-semibold"
-                    aria-sort={
-                      sortConfig.key === column.key
-                        ? sortConfig.direction === "asc"
-                          ? "ascending"
-                          : "descending"
-                        : "none"
-                    }
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSort(column.key)}
+                {columns.map((column) => {
+                  const sortable = column.key !== "review" && column.sortable !== false;
+                  const isActiveSort = sortable && sortConfig.key === column.key;
+                  return (
+                    <th
+                      key={column.key}
                       className={clsx(
-                        "flex items-center gap-2 rounded-md px-2 py-1 transition",
-                        sortConfig.key === column.key
-                          ? "bg-brand-500/20 text-white"
-                          : "hover:bg-slate-800/50"
+                        "px-4 py-3 text-left font-semibold",
+                        column.sticky === "left" && "sticky left-0 z-20 bg-slate-900/95 backdrop-blur",
+                        column.sticky === "right" && "sticky right-0 z-20 bg-slate-900/95 backdrop-blur"
                       )}
+                      aria-sort={
+                        sortable
+                          ? isActiveSort
+                            ? sortConfig.direction === "asc"
+                              ? "ascending"
+                              : "descending"
+                            : "none"
+                          : undefined
+                      }
                     >
-                      <span>{column.label}</span>
-                      <span className="text-[10px]">
-                        {sortConfig.key === column.key
-                          ? sortConfig.direction === "asc"
-                            ? "▲"
-                            : "▼"
-                          : "↕"}
-                      </span>
-                    </button>
-                  </th>
-                ))}
-                {feedbackEnabled && (
-                  <th className="px-4 py-3 text-left font-semibold">
-                    <div className="flex items-center gap-2">
-                      <span>Feedback</span>
-                      {feedbackLoading && (
-                        <span className="h-2 w-2 animate-pulse rounded-full bg-brand-400" aria-hidden="true" />
+                      {sortable ? (
+                        <button
+                          type="button"
+                          onClick={() => handleSort(column.key as SortKey)}
+                          className={clsx(
+                            "flex items-center gap-2 rounded-md px-2 py-1 transition",
+                            isActiveSort ? "bg-brand-500/20 text-white" : "hover:bg-slate-800/50"
+                          )}
+                        >
+                          <span>{column.label}</span>
+                          <span className="text-[10px]">
+                            {isActiveSort ? (sortConfig.direction === "asc" ? "▲" : "▼") : "↕"}
+                          </span>
+                        </button>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span>{column.label}</span>
+                          {column.key === "review" && reviewLoading && (
+                            <span className="h-2 w-2 animate-pulse rounded-full bg-brand-400" aria-hidden="true" />
+                          )}
+                        </div>
                       )}
-                    </div>
-                    {feedbackError && (
-                      <p className="mt-1 text-[11px] text-rose-300">{feedbackError}</p>
-                    )}
-                  </th>
-                )}
+                      {column.key === "review" && reviewError && (
+                        <p className="mt-1 text-[11px] text-rose-300">{reviewError}</p>
+                      )}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-900/70">
-              {sortedRows.map((row) => {
-                const summary = feedbackSummaries[row.issueKey];
-                return (
-                  <tr key={row.issueKey} className="hover:bg-slate-900/40">
-                    <td className="px-4 py-3 text-brand-200 underline decoration-brand-600 hover:text-brand-100">
-                      <a href={`${JIRA_BASE_URL}${row.issueKey}`} target="_blank" rel="noreferrer">
-                        {row.issueKey}
-                      </a>
-                    </td>
-                    <td className="px-4 py-3">
-                      <DisplayName
-                        id={row.agentId}
-                        mapping={mapping}
-                        agentMapping={agentMapping}
-                        deAnonymize={deAnonymize}
-                        titlePrefix="Agent ID"
-                        showRole={true}
-                        role={row.agentRole}
-                      />
-                    </td>
-                    <td className="px-4 py-3">
-                      <DisplayName
-                        id={row.customerId}
-                        mapping={mapping}
-                        deAnonymize={deAnonymize}
-                        titlePrefix="Customer ID"
-                      />
-                    </td>
-                    <td className="px-4 py-3">
-                      <TruncatedText value={row.ticketSummary} />
-                    </td>
-                    <td className="px-4 py-3">
-                      {row.resolved ? (
-                        <span className="text-emerald-300">Yes</span>
-                      ) : (
-                        <span
-                          className="text-amber-300"
-                          title={row.resolutionWhy ? `Resolution summary: ${row.resolutionWhy}` : undefined}
-                        >
-                          No
-                        </span>
+              {sortedRows.map((row) => (
+                <tr key={row.issueKey} className="hover:bg-slate-900/40">
+                  {columns.map((column) => (
+                    <td
+                      key={column.key}
+                      className={clsx(
+                        "px-4 py-3 align-top text-slate-100",
+                        column.sticky === "left" && "sticky left-0 z-10 bg-slate-950",
+                        column.sticky === "right" && "sticky right-0 z-10 bg-slate-950",
+                        column.cellClassName?.(row)
                       )}
+                    >
+                      {column.render(row)}
                     </td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex items-center gap-2 rounded-full border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-100">
-                        <span className="h-2 w-2 rounded-full bg-amber-300" />
-                        <TruncatedText value={row.contactReasonOriginal} />
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-100">
-                        <span className="h-2 w-2 rounded-full bg-emerald-300" />
-                        <TruncatedText value={row.contactReason} />
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <TruncatedText value={row.reasonOverride || "—"} />
-                    </td>
-                    <td className="px-4 py-3">{formatNumber(row.agentScore)}</td>
-                    <td className="px-4 py-3">{formatNumber(row.customerScore)}</td>
-                    <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-semibold ${sentimentBadgeClass(row.sentiment)}`}
-                      >
-                        <span className="h-2 w-2 rounded-full bg-current opacity-80" />
-                        {row.sentiment}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <TruncatedText value={row.resolutionWhy} />
-                    </td>
-                    <td className="px-4 py-3">
-                      <TruncatedText value={row.improvementTip} />
-                    </td>
-                    {feedbackEnabled && (
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <FeedbackButton
-                            verdict="up"
-                            summary={summary}
-                            disabled={feedbackLoading}
-                            onClick={() => handleFeedbackClick(row.issueKey, "up")}
-                          />
-                          <FeedbackButton
-                            verdict="down"
-                            summary={summary}
-                            disabled={feedbackLoading}
-                            onClick={() => handleFeedbackClick(row.issueKey, "down")}
-                          />
-                        </div>
-                      </td>
-                    )}
-                  </tr>
-                );
-              })}
+                  ))}
+                </tr>
+              ))}
               {!sortedRows.length && (
                 <tr>
                   <td className="px-4 py-6 text-center text-slate-400" colSpan={columnCount}>
@@ -538,21 +813,21 @@ export function DrilldownTable({
           </table>
         </div>
       </div>
-      {feedbackEnabled && (
-        <FeedbackModal
-          open={Boolean(feedbackDialog)}
-          issueKey={feedbackDialog?.issueKey ?? ""}
-          verdict={feedbackDialog?.verdict ?? "up"}
-          notes={feedbackNotes}
-          notesLimit={FEEDBACK_NOTES_LIMIT}
-          onNotesChange={setFeedbackNotes}
-          displayName={feedbackDisplayName}
-          onDisplayNameChange={setFeedbackDisplayName}
-          submitting={feedbackSubmitting}
-          error={feedbackSubmitError}
-          onClose={handleFeedbackClose}
-          onSubmit={handleFeedbackSubmit}
-          summary={activeFeedbackSummary}
+      {reviewEnabled && (
+        <ReviewModal
+          open={Boolean(reviewDialog)}
+          issueKey={reviewDialog?.issueKey ?? ""}
+          verdict={reviewDialog?.verdict ?? "up"}
+          notes={reviewNotes}
+          notesLimit={REVIEW_NOTES_LIMIT}
+          onNotesChange={setReviewNotes}
+          displayName={reviewDisplayName}
+          onDisplayNameChange={setReviewDisplayName}
+          submitting={reviewSubmitting}
+          error={reviewSubmitError}
+          onClose={handleReviewClose}
+          onSubmit={handleReviewSubmit}
+          summary={activeReviewSummary}
         />
       )}
     </div>
@@ -566,13 +841,25 @@ function formatNumber(value: number | null): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
-function TruncatedText({ value }: { value: string }) {
+function TruncatedText({ value, truncate = false }: { value: string; truncate?: boolean }) {
   const display = value && value.trim().length ? value : "—";
+  if (display === "—") {
+    return <span className="text-slate-300">—</span>;
+  }
+  if (!truncate) {
+    return <div className="whitespace-pre-wrap break-words text-slate-100">{display}</div>;
+  }
+
   const wrapperRef = useRef<HTMLDivElement | null>(null);
-  const [tooltip, setTooltip] = useState<{ top: number; left: number; width: number; content: string } | null>(null);
+  const [tooltip, setTooltip] = useState<{
+    top: number;
+    left: number;
+    width: number;
+    content: string;
+  } | null>(null);
 
   const showTooltip = () => {
-    if (!wrapperRef.current || typeof window === "undefined" || display === "—") {
+    if (!wrapperRef.current || typeof window === "undefined") {
       return;
     }
     const rect = wrapperRef.current.getBoundingClientRect();
@@ -587,15 +874,11 @@ function TruncatedText({ value }: { value: string }) {
     setTooltip(null);
   };
 
-  if (display === "—") {
-    return <span className="text-slate-300">—</span>;
-  }
-
   return (
     <>
       <div
         ref={wrapperRef}
-        className="max-w-[18rem] cursor-help"
+        className="max-w-[16rem] cursor-help"
         tabIndex={0}
         onMouseEnter={showTooltip}
         onFocus={showTooltip}
@@ -656,23 +939,24 @@ function numberValue(value: number | boolean | null | undefined): number {
   return -Infinity;
 }
 
-type FeedbackSummariesResponse = {
-  summaries: Record<string, MisclassifiedFeedbackSummary>;
+type ReviewSummariesResponse = {
+  summaries: Record<string, MisclassificationReviewSummary>;
+  warning?: string;
 };
 
-async function requestFeedbackSummaries(issueKeys: string[], userId?: string | null) {
+async function requestReviewSummaries(issueKeys: string[], userId?: string | null) {
   const uniqueKeys = Array.from(new Set(issueKeys));
   const params = new URLSearchParams();
   uniqueKeys.forEach((key) => params.append("issueKey", key));
   if (userId) {
     params.set("userId", userId);
   }
-  const response = await fetch(`/api/misclassified-feedback?${params.toString()}`);
+  const response = await fetch(`/api/misclassification-reviews?${params.toString()}`);
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `Unable to load feedback (${response.status}).`);
+    throw new Error(text || `Unable to load reviews (${response.status}).`);
   }
-  const payload = (await response.json()) as FeedbackSummariesResponse;
+  const payload = (await response.json()) as ReviewSummariesResponse;
   return payload.summaries ?? {};
 }
 
@@ -696,10 +980,10 @@ function getBrowserFingerprint(): string | null {
   return raw ? raw.slice(0, 160) : null;
 }
 
-type FeedbackModalProps = {
+type ReviewModalProps = {
   open: boolean;
   issueKey: string;
-  verdict: FeedbackVerdict;
+  verdict: MisclassificationVerdict;
   notes: string;
   notesLimit: number;
   onNotesChange: (value: string) => void;
@@ -709,10 +993,10 @@ type FeedbackModalProps = {
   error: string | null;
   onClose: () => void;
   onSubmit: () => void;
-  summary?: MisclassifiedFeedbackSummary;
+  summary?: MisclassificationReviewSummary;
 };
 
-function FeedbackModal({
+function ReviewModal({
   open,
   issueKey,
   verdict,
@@ -726,7 +1010,7 @@ function FeedbackModal({
   onClose,
   onSubmit,
   summary
-}: FeedbackModalProps) {
+}: ReviewModalProps) {
   if (!open || typeof document === "undefined") {
     return null;
   }
@@ -744,7 +1028,7 @@ function FeedbackModal({
     lastUpdatedDate && !Number.isNaN(lastUpdatedDate.valueOf())
       ? formatDateTimeLocal(lastUpdatedDate)
       : null;
-  const ariaLabel = issueKey ? `${verdictLabel} feedback for ${issueKey}` : "Misclassified feedback";
+  const ariaLabel = issueKey ? `${verdictLabel} review for ${issueKey}` : "Misclassification review";
 
   const handleNotesChange = (value: string) => {
     onNotesChange(value.slice(0, notesLimit));
@@ -864,14 +1148,14 @@ function FeedbackModal({
   return createPortal(body, document.body);
 }
 
-type FeedbackButtonProps = {
-  verdict: FeedbackVerdict;
-  summary?: MisclassifiedFeedbackSummary;
+type ReviewButtonProps = {
+  verdict: MisclassificationVerdict;
+  summary?: MisclassificationReviewSummary;
   disabled?: boolean;
   onClick: () => void;
 };
 
-function FeedbackButton({ verdict, summary, disabled, onClick }: FeedbackButtonProps) {
+function ReviewButton({ verdict, summary, disabled, onClick }: ReviewButtonProps) {
   const count = verdict === "up" ? summary?.upCount ?? 0 : summary?.downCount ?? 0;
   const isMine = summary?.userVerdict === verdict;
   const hasVotes = count > 0;
@@ -896,7 +1180,7 @@ function FeedbackButton({ verdict, summary, disabled, onClick }: FeedbackButtonP
       onClick={onClick}
       disabled={disabled}
       className={clsx(baseClasses, verdictClasses, disabled && "cursor-not-allowed opacity-60")}
-      aria-label={`Leave ${verdict === "up" ? "thumbs up" : "thumbs down"} feedback`}
+      aria-label={`Leave ${verdict === "up" ? "thumbs up" : "thumbs down"} review`}
       aria-pressed={isMine}
     >
       <ThumbIcon direction={verdict} />
@@ -905,7 +1189,7 @@ function FeedbackButton({ verdict, summary, disabled, onClick }: FeedbackButtonP
   );
 }
 
-function ThumbIcon({ direction }: { direction: FeedbackVerdict }) {
+function ThumbIcon({ direction }: { direction: MisclassificationVerdict }) {
   return (
     <svg
       viewBox="0 0 24 24"

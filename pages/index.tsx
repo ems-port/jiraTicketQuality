@@ -103,6 +103,7 @@ const DEFAULT_REFRESH_STATE: RefreshJobState = {
 type DrilldownState = {
   metricLabel: string;
   rows: ConversationRow[];
+  initialAgentId?: string | null;
 } | null;
 
 type LatestTicketInfo = {
@@ -738,8 +739,8 @@ export default function DashboardPage({
     }
   };
 
-  const openDrilldown = (metricLabel: string, data: ConversationRow[]) => {
-    setDrilldownState({ metricLabel, rows: data });
+  const openDrilldown = (metricLabel: string, data: ConversationRow[], initialAgentId?: string | null) => {
+    setDrilldownState({ metricLabel, rows: data, initialAgentId });
   };
 
   const handleContactReasonSelect = useCallback(
@@ -760,14 +761,11 @@ export default function DashboardPage({
       if (!agentId) {
         return;
       }
-      const agentRows = filteredRows.filter(
-        (row) => row.contactReasonChange && row.agentList.includes(agentId)
-      );
-      if (!agentRows.length) {
+      const misclassifiedRows = filteredRows.filter((row) => row.contactReasonChange);
+      if (!misclassifiedRows.length) {
         return;
       }
-      const display = resolveDisplayName(agentId, idMapping, deAnonymize, agentNameMap);
-      openDrilldown(`Misclassified: ${display.label}`, agentRows);
+      openDrilldown("Misclassified", misclassifiedRows, agentId);
     },
     [filteredRows, idMapping, deAnonymize, agentNameMap]
   );
@@ -787,7 +785,7 @@ export default function DashboardPage({
   const unresolvedFooterText = selectedResolvedStats.total
     ? `${unresolvedCount.toLocaleString()} of ${selectedResolvedStats.total.toLocaleString()} not resolved`
     : "No tickets in this window";
-  const misclassifiedFeedbackEnabled =
+  const misclassificationReviewEnabled =
     (drilldownState?.metricLabel ?? "").toLowerCase().includes("misclassified");
 
   return (
@@ -1168,7 +1166,8 @@ export default function DashboardPage({
         agentMapping={agentNameMap}
         deAnonymize={deAnonymize}
         roleMapping={roleMapping}
-        feedbackEnabled={misclassifiedFeedbackEnabled}
+        reviewEnabled={misclassificationReviewEnabled}
+        initialAgentFilter={drilldownState?.initialAgentId ?? null}
       />
 
       <TipsDrilldownModal

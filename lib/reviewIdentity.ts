@@ -1,12 +1,12 @@
-export type FeedbackIdentity = {
+export type ReviewIdentity = {
   id: string;
   displayName: string | null;
 };
 
-const STORAGE_ID_KEY = "misclassifiedFeedbackUserId";
-const STORAGE_NAME_KEY = "misclassifiedFeedbackDisplayName";
+const STORAGE_ID_KEY = "misclassificationReviewUserId";
+const STORAGE_NAME_KEY = "misclassificationReviewDisplayName";
 
-export function ensureFeedbackIdentity(): FeedbackIdentity | null {
+export function ensureReviewIdentity(): ReviewIdentity | null {
   if (typeof window === "undefined") {
     return null;
   }
@@ -19,7 +19,7 @@ export function ensureFeedbackIdentity(): FeedbackIdentity | null {
   return { id, displayName: displayName && displayName.trim().length ? displayName.trim() : null };
 }
 
-export function persistFeedbackDisplayName(name: string): FeedbackIdentity | null {
+export function persistReviewDisplayName(name: string): ReviewIdentity | null {
   if (typeof window === "undefined") {
     return null;
   }
@@ -31,12 +31,12 @@ export function persistFeedbackDisplayName(name: string): FeedbackIdentity | nul
   }
   const id = window.localStorage.getItem(STORAGE_ID_KEY);
   if (!id) {
-    return ensureFeedbackIdentity();
+    return ensureReviewIdentity();
   }
   return { id, displayName: trimmed || null };
 }
 
-export function clearFeedbackIdentity() {
+export function clearReviewIdentity() {
   if (typeof window === "undefined") {
     return;
   }

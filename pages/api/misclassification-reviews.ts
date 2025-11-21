@@ -1,11 +1,11 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-import type { FeedbackVerdict, MisclassifiedFeedbackSummary } from "@/types";
+import type { MisclassificationVerdict, MisclassificationReviewSummary } from "@/types";
 
-type FeedbackRow = {
+type ReviewRow = {
   issue_key: string;
-  verdict: FeedbackVerdict;
+  verdict: MisclassificationVerdict;
   notes: string | null;
   user_id: string;
   user_display: string | null;
@@ -13,12 +13,16 @@ type FeedbackRow = {
   created_at: string | null;
 };
 
-type FeedbackResponseBody = {
-  summaries: Record<string, MisclassifiedFeedbackSummary>;
+type ReviewResponseBody = {
+  summaries: Record<string, MisclassificationReviewSummary>;
+  warning?: string;
 };
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const TABLE_NAME = "misclassification_reviews";
+const TABLE_WARNING =
+  "Misclassification reviews table not found. Apply supabase/schema.sql to enable review storage.";
 
 let cachedClient: SupabaseClient | null = null;
 
@@ -70,9 +74,14 @@ async function handleGet(req: NextApiRequest, res: NextApiResponse, client: Supa
   const userId = parseString(req.query.userId, 120);
   try {
     const summaries = await fetchSummaries(client, issueKeys, userId);
-    res.status(200).json({ summaries } satisfies FeedbackResponseBody);
+    res.status(200).json({ summaries } satisfies ReviewResponseBody);
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message ?? "Unable to fetch feedback." });
+    if (isMissingTableError(error)) {
+      console.warn("[misclassification-reviews] table missing. Did you run supabase/schema.sql?");
+      res.status(200).json({ summaries: {}, warning: TABLE_WARNING });
+      return;
+    }
+    res.status(500).json({ error: (error as Error).message ?? "Unable to fetch reviews." });
   }
 }
 
@@ -109,7 +118,7 @@ async function handlePost(req: NextApiRequest, res: NextApiResponse, client: Sup
     };
 
     const { error } = await client
-      .from("misclassified_feedback")
+      .from(TABLE_NAME)
       .upsert(payload, { onConflict: "issue_key,user_id" });
 
     if (error) {
@@ -117,9 +126,13 @@ async function handlePost(req: NextApiRequest, res: NextApiResponse, client: Sup
     }
 
     const summaries = await fetchSummaries(client, [issueKey], userId);
-    res.status(200).json({ summaries } satisfies FeedbackResponseBody);
+    res.status(200).json({ summaries } satisfies ReviewResponseBody);
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message ?? "Unable to save feedback." });
+    if (isMissingTableError(error)) {
+      res.status(500).json({ error: TABLE_WARNING });
+      return;
+    }
+    res.status(500).json({ error: (error as Error).message ?? "Unable to save review." });
   }
 }
 
@@ -127,7 +140,7 @@ async function fetchSummaries(
   client: SupabaseClient,
   issueKeys: string[],
   userId?: string | null
-): Promise<Record<string, MisclassifiedFeedbackSummary>> {
+): Promise<Record<string, MisclassificationReviewSummary>> {
   const deduped = Array.from(
     new Set(issueKeys.map((key) => key.trim()).filter((key) => key.length > 0))
   );
@@ -136,7 +149,7 @@ async function fetchSummaries(
   }
 
   const { data, error } = await client
-    .from("misclassified_feedback")
+    .from(TABLE_NAME)
     .select("issue_key, verdict, notes, user_id, user_display, updated_at, created_at")
     .in("issue_key", deduped)
     .order("updated_at", { ascending: false });
@@ -145,16 +158,16 @@ async function fetchSummaries(
     throw error;
   }
 
-  const rows = (data ?? []) as FeedbackRow[];
+  const rows = (data ?? []) as ReviewRow[];
   return buildSummaryMap(rows, deduped, userId);
 }
 
 function buildSummaryMap(
-  rows: FeedbackRow[],
+  rows: ReviewRow[],
   issueKeys: string[],
   userId?: string | null
-): Record<string, MisclassifiedFeedbackSummary> {
-  const baseTemplate = (): MisclassifiedFeedbackSummary => ({
+): Record<string, MisclassificationReviewSummary> {
+  const baseTemplate = (): MisclassificationReviewSummary => ({
     issueKey: "",
     upCount: 0,
     downCount: 0,
@@ -166,7 +179,7 @@ function buildSummaryMap(
     userDisplayName: null
   });
 
-  const summary: Record<string, MisclassifiedFeedbackSummary> = {};
+  const summary: Record<string, MisclassificationReviewSummary> = {};
   issueKeys.forEach((key) => {
     summary[key] = { ...baseTemplate(), issueKey: key };
   });
@@ -225,7 +238,7 @@ function parseString(value: unknown, maxLength: number): string | null {
   return trimmed.slice(0, maxLength);
 }
 
-function normalizeVerdict(value: unknown): FeedbackVerdict | null {
+function normalizeVerdict(value: unknown): MisclassificationVerdict | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -245,4 +258,12 @@ function parseNotes(value: unknown): string | null {
     return null;
   }
   return trimmed.slice(0, 1000);
+}
+
+function isMissingTableError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = (error as { code?: string }).code;
+  return code === "42P01" || (error as Error).message?.includes(TABLE_NAME);
 }
