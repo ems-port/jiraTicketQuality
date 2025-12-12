@@ -296,12 +296,18 @@ def _normalise_llm_payload(
 
     contact_reason = _stringify(data.get("contact_reason"))
     original_reason = contact_reason_original.strip()
+    normalized_contact = contact_reason.lower().strip() if contact_reason else ""
+    normalized_original = original_reason.lower().strip() if original_reason else ""
+
     contact_reason_change = _coerce_bool(data.get("contact_reason_change"))
-    if contact_reason_change is None:
-        if contact_reason and original_reason:
-            contact_reason_change = contact_reason.lower() != original_reason.lower()
+    # Force to False when normalized reasons match
+    if normalized_contact and normalized_original and normalized_contact == normalized_original:
+        contact_reason_change = False
+    elif contact_reason_change is None:
+        if normalized_contact and normalized_original:
+            contact_reason_change = normalized_contact != normalized_original
         else:
-            contact_reason_change = bool(contact_reason and not original_reason)
+            contact_reason_change = bool(normalized_contact and not normalized_original)
     data["contact_reason_change"] = bool(contact_reason_change)
 
     is_resolved_flag = _coerce_bool(data.get("is_resolved"))

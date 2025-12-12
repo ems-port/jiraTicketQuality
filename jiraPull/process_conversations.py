@@ -316,6 +316,21 @@ create table if not exists public.jira_processed_conversations (
 
 
 def row_to_record(row: Dict[str, str]) -> Dict[str, Any]:
+    def _normalized_reason(value: str | None) -> str:
+        return (value or "").strip().lower()
+
+    original_reason = row.get("contact_reason_original")
+    corrected_reason = row.get("contact_reason")
+    normalized_original = _normalized_reason(original_reason)
+    normalized_corrected = _normalized_reason(corrected_reason)
+
+    contact_reason_change = to_bool(row.get("contact_reason_change", ""))
+    if normalized_original and normalized_corrected:
+        if normalized_original == normalized_corrected:
+            contact_reason_change = False
+        else:
+            contact_reason_change = True
+
     return {
         "issue_key": row.get("issue_key") or None,
         "status": row.get("status") or None,
@@ -347,9 +362,9 @@ def row_to_record(row: Dict[str, str]) -> Dict[str, Any]:
         "steps_extract": parse_json_field(row.get("steps_extract", "")),
         "resolution_timestamp_iso": to_timestamp(row.get("resolution_timestamp_iso", "")),
         "resolution_message_index": to_int(row.get("resolution_message_index", "")),
-        "contact_reason": row.get("contact_reason") or None,
-        "contact_reason_original": row.get("contact_reason_original") or None,
-        "contact_reason_change": to_bool(row.get("contact_reason_change", "")),
+        "contact_reason": corrected_reason or None,
+        "contact_reason_original": original_reason or None,
+        "contact_reason_change": contact_reason_change,
         "reason_override_why": row.get("reason_override_why") or None,
         "resolution_why": row.get("resolution_why") or None,
         "customer_sentiment_primary": row.get("customer_sentiment_primary") or None,

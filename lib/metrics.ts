@@ -61,7 +61,19 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
   const contactReasonOriginalRaw = asString(raw.contact_reason_original ?? raw.custom_field_contact_reason);
   const contactReason = contactReasonRaw ? contactReasonRaw : null;
   const contactReasonOriginal = contactReasonOriginalRaw ? contactReasonOriginalRaw : null;
-  const contactReasonChange = asBoolean(raw.contact_reason_change);
+  const contactReasonChangeFlag = asBoolean(raw.contact_reason_change);
+  const normalizedOriginal = normalizeReasonLabel(contactReasonOriginal);
+  const normalizedCorrected = normalizeReasonLabel(contactReason);
+  const hasReasonDiff =
+    Boolean(normalizedOriginal) &&
+    Boolean(normalizedCorrected) &&
+    normalizedOriginal !== normalizedCorrected;
+  let contactReasonChange = contactReasonChangeFlag;
+  if (hasReasonDiff) {
+    contactReasonChange = true;
+  } else if (normalizedOriginal && normalizedCorrected && normalizedOriginal === normalizedCorrected) {
+    contactReasonChange = false;
+  }
   const reasonOverrideRaw =
     asString(raw.reason_override_why) ||
     asString(raw.contact_reason_change_justification) ||
@@ -1039,6 +1051,13 @@ function normaliseList(value: string): string[] {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function normalizeReasonLabel(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  return value.trim().toLowerCase();
 }
 
 function formatDateKey(date: Date): string {
