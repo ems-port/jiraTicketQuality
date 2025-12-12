@@ -299,6 +299,12 @@ def _normalise_llm_payload(
     normalized_contact = contact_reason.lower().strip() if contact_reason else ""
     normalized_original = original_reason.lower().strip() if original_reason else ""
 
+    # If the original was marked Duplicate, do not reclassify.
+    if normalized_original == "duplicate":
+        contact_reason = original_reason
+        normalized_contact = normalized_original
+        data["reason_override_why"] = ""
+
     contact_reason_change = _coerce_bool(data.get("contact_reason_change"))
     # Force to False when normalized reasons match
     if normalized_contact and normalized_original and normalized_contact == normalized_original:
@@ -308,6 +314,7 @@ def _normalise_llm_payload(
             contact_reason_change = normalized_contact != normalized_original
         else:
             contact_reason_change = bool(normalized_contact and not normalized_original)
+    data["contact_reason"] = contact_reason
     data["contact_reason_change"] = bool(contact_reason_change)
 
     is_resolved_flag = _coerce_bool(data.get("is_resolved"))
@@ -965,7 +972,7 @@ def build_llm_prompts(
         Review the conversation above and respond with a SINGLE JSON object that satisfies the schema below.
 
         Task sequence (complete all steps):
-        1. Compare the customer's stated problem to the agent's classification. Set contact_reason_change=true when your chosen contact_reason differs from the original, and explain the override using literal phrases or timestamps from the transcript.
+        1. Compare the customer's stated problem to the agent's classification. If the original contact reason is "Duplicate", keep contact_reason="Duplicate" and contact_reason_change=false. Otherwise, set contact_reason_change=true when your chosen contact_reason differs from the original, and explain the override using literal phrases or timestamps from the transcript.
         2. Decide whether the conversation is resolved. Set both resolved and is_resolved accordingly, and write resolution_why that cites the agent or customer action that proves the outcome (or why it failed).
         3. Provide one-sentence summaries:
            a. problem_extract – concise but specific customer problem (<=250 chars). Mention concrete damage, location, or outage cause.
