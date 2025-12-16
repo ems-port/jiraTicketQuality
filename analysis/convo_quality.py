@@ -750,6 +750,8 @@ def load_taxonomy(path: Optional[str]) -> Sequence[str]:
             if configured:
                 return configured
         except Exception as exc:
+            if getattr(_CONFIG_STORE, "require_remote", False):
+                raise
             _CONFIG_LOG.warning("Falling back to default taxonomy: %s", exc)
     return AGENT_CONTACT_HEADINGS
 

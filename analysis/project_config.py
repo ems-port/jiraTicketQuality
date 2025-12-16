@@ -273,20 +273,39 @@ class ProjectConfigStore:
         *,
         supabase_url: Optional[str] = None,
         supabase_key: Optional[str] = None,
-        cache_dir: Path | str = Path("local_data/config_cache"),
+        cache_dir: Path | str | None = Path("local_data/config_cache"),
         refresh_interval_seconds: int = 300,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.supabase_url = supabase_url or os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
         self.supabase_key = supabase_key or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir = self._resolve_cache_dir(cache_dir)
         self.refresh_interval_seconds = max(30, refresh_interval_seconds)
         self.log = logger or logging.getLogger(self.__class__.__name__)
+        self.require_remote = os.getenv("PORT_CONFIG_REQUIRE_REMOTE") == "1"
         self._entries: Dict[ProjectConfigType, ProjectConfigEntry] = {}
         self._lock = threading.Lock()
         self._last_refresh = 0.0
         self._client: Optional[Client] = None
+
+    def _resolve_cache_dir(self, configured: Path | str | None) -> Optional[Path]:
+        disable_cache = os.getenv("PORT_CONFIG_CACHE_DISABLE") == "1" or os.getenv("VERCEL") == "1"
+        if disable_cache:
+            return None
+        candidates = [
+            Path(os.getenv("PORT_CONFIG_CACHE_DIR")) if os.getenv("PORT_CONFIG_CACHE_DIR") else None,
+            Path(configured) if configured else None,
+            Path(os.getenv("TMPDIR") or "/tmp") / "port_config_cache",
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+                return candidate
+            except OSError:
+                continue
+        return None
 
     def _client_if_available(self) -> Optional[Client]:
         if self._client is not None:
@@ -306,6 +325,8 @@ class ProjectConfigStore:
         return self.cache_dir / f"{config_type}.json"
 
     def _read_cache(self) -> Dict[ProjectConfigType, ProjectConfigEntry]:
+        if self.cache_dir is None:
+            return {}
         entries: Dict[ProjectConfigType, ProjectConfigEntry] = {}
         for config_type in CONFIG_TYPES:
             path = self._cache_path(config_type)
@@ -331,6 +352,8 @@ class ProjectConfigStore:
         return entries
 
     def _write_cache(self, entries: Mapping[ProjectConfigType, ProjectConfigEntry]) -> None:
+        if self.cache_dir is None:
+            return
         for entry in entries.values():
             try:
                 path = self._cache_path(entry.type)
@@ -482,10 +505,14 @@ class ProjectConfigStore:
             if remote_entries:
                 entries.update(remote_entries)
                 self._write_cache(remote_entries)
+            elif self.require_remote:
+                raise RuntimeError("Remote project_config required but unavailable.")
 
             defaults = self._load_defaults()
             for key, default_entry in defaults.items():
                 if key not in entries:
+                    if self.require_remote:
+                        raise RuntimeError(f"Missing remote config for {key}")
                     entries[key] = default_entry
 
             self._entries = dict(entries)
@@ -575,6 +602,8 @@ class ProjectConfigStore:
         remote = self._fetch_contact_taxonomy_remote()
         if remote:
             return remote
+        if self.require_remote:
+            raise RuntimeError("Remote contact_taxonomy required but unavailable.")
         entries = self.load()
         entry = entries.get("contact_taxonomy")
         if entry and isinstance(entry.payload, Mapping) and validate_payload("contact_taxonomy", entry.payload):
