@@ -36,15 +36,18 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
 
 OpenAIClient = tuple[str, Any]
 try:
-    from contact_taxonomy import (  # type: ignore
+    from analysis.default_taxonomy import (  # type: ignore
         AGENT_CONTACT_HEADINGS,
         KEYWORD_CONTACT_MAP,
     )
-
     DEFAULT_TAXONOMY: Sequence[str] = AGENT_CONTACT_HEADINGS
 except ImportError:
-    DEFAULT_TAXONOMY = ()
-    KEYWORD_CONTACT_MAP = {}
+    try:
+        from default_taxonomy import AGENT_CONTACT_HEADINGS, KEYWORD_CONTACT_MAP  # type: ignore
+        DEFAULT_TAXONOMY = AGENT_CONTACT_HEADINGS
+    except ImportError:
+        DEFAULT_TAXONOMY = ()
+        KEYWORD_CONTACT_MAP = {}
 
 
 def build_system_prompt(

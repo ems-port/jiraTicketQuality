@@ -162,13 +162,17 @@ async function runIngestion(): Promise<{ fetched: number; skipped: number }> {
   return { fetched, skipped };
 }
 
-async function runProcessor(totalHint: number | null): Promise<number> {
+async function runProcessor(totalHint: number | null, debugMode = false): Promise<number> {
   let processed = 0;
   let total = typeof totalHint === "number" && totalHint > 0 ? totalHint : null;
   const processingStartedAt = Date.now();
   const limit = Math.max(1, total ?? 50);
+  const args = [PROCESS_SCRIPT, "--limit", String(limit), "--concurrency", String(PROCESS_CONCURRENCY)];
+  if (debugMode) {
+    args.push("--debug", "--debug-prompts", "both");
+  }
   await runPythonScript(
-    [PROCESS_SCRIPT, "--limit", String(limit), "--concurrency", String(PROCESS_CONCURRENCY)],
+    args,
     (line) => {
       const progressMatch = line.match(/Processing progress:\s*(\d+)\/(\d+)/i);
       if (progressMatch) {
@@ -397,6 +401,7 @@ async function runRemoteProcessing(totalPending: number | null) {
 }
 
 async function executeJob() {
+  const debugMode = typeof (global as any).__REFRESH_DEBUG_LLM === "boolean" ? (global as any).__REFRESH_DEBUG_LLM : false;
   try {
     updateJobState({
       running: true,
@@ -428,7 +433,9 @@ async function executeJob() {
       });
     }
 
-    const processed = isProductionHosted() ? await runRemoteProcessing(pending) : await runProcessor(pending);
+    const processed = isProductionHosted()
+      ? await runRemoteProcessing(pending)
+      : await runProcessor(pending, debugMode);
 
     const remainingPending = await countPendingConversations();
     const hasRemaining = typeof remainingPending === "number" && remainingPending > 0;
@@ -486,6 +493,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.status(500).json({ error: "Supabase credentials missing" });
       return;
     }
+    (global as any).__REFRESH_DEBUG_LLM = req.query.debug === "1" || req.body?.debug === true;
     startJob();
     res.status(202).json(jobState);
     return;

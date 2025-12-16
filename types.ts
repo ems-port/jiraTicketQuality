@@ -28,6 +28,53 @@ export interface SettingsState {
   min_msgs_for_toxicity: number;
 }
 
+export type ProjectConfigType =
+  | "system_prompt"
+  | "internal_users"
+  | "customer_score"
+  | "agent_score"
+  | "conversation_rating"
+  | "task_sequence"
+  | "additional_instructions"
+  | "contact_taxonomy"
+  | "prompt_header"
+  | "prompt_json_schema";
+
+export interface ProjectConfigEntry {
+  type: ProjectConfigType;
+  payload: unknown;
+  version: number;
+  checksum?: string | null;
+  updated_at?: string | null;
+  updated_by?: string | null;
+  is_active?: boolean | null;
+  id?: string;
+}
+
+export type ContactTaxonomyStatus = "NEW" | "IN_USE" | "OBSOLETED" | "CANCELLED";
+
+export interface ContactTaxonomyReason {
+  topic: string;
+  sub_reason?: string | null;
+  description?: string | null;
+  keywords?: string[];
+  sort_order?: number | null;
+  status?: ContactTaxonomyStatus;
+}
+
+export interface ContactTaxonomyPayload {
+  reasons: ContactTaxonomyReason[];
+}
+
+export interface ContactTaxonomyVersion extends ContactTaxonomyPayload {
+  version: number;
+  status: ContactTaxonomyStatus;
+  notes?: string | null;
+  created_at?: string | null;
+  created_by?: string | null;
+  labels?: string[];
+}
+
 export interface ConversationRow {
   issueKey: string;
   agent: string;

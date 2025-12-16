@@ -1,7 +1,13 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { AgentRole, ConversationRow } from "@/types";
+import type { AgentRole, ConversationRow, SettingsState } from "@/types";
+
+const DEFAULT_SETTINGS: SettingsState = {
+  toxicity_threshold: 0.8,
+  abusive_caps_trigger: 5,
+  min_msgs_for_toxicity: 3
+};
 
 type IdMapping = Record<string, string>;
 type RoleMapping = Record<string, AgentRole>;
@@ -10,12 +16,16 @@ interface DashboardState {
   rows: ConversationRow[];
   sampleDataActive: boolean;
   deAnonymize: boolean;
+  settings: SettingsState;
+  debugLLM: boolean;
   idMapping: IdMapping;
   roleMapping: RoleMapping;
   setRows: (rows: ConversationRow[], options?: { sampleData?: boolean }) => void;
   clearRows: () => void;
   setSampleDataActive: (active: boolean) => void;
   setDeAnonymize: (value: boolean) => void;
+  setSettings: (next: SettingsState) => void;
+  setDebugLLM: (value: boolean) => void;
   setIdMapping: (mapping: IdMapping) => void;
   mergeIdMapping: (mapping: IdMapping) => void;
   setRoleMapping: (mapping: RoleMapping) => void;
@@ -29,6 +39,8 @@ export const useDashboardStore = create<DashboardState>()(
       rows: [],
       sampleDataActive: false,
       deAnonymize: false,
+      settings: DEFAULT_SETTINGS,
+      debugLLM: false,
       idMapping: {},
       roleMapping: {},
       setRows: (rows, options) => {
@@ -41,6 +53,8 @@ export const useDashboardStore = create<DashboardState>()(
       clearRows: () => set({ rows: [], sampleDataActive: false }),
       setSampleDataActive: (active) => set({ sampleDataActive: active }),
       setDeAnonymize: (value) => set({ deAnonymize: value }),
+      setSettings: (next) => set({ settings: next }),
+      setDebugLLM: (value) => set({ debugLLM: value }),
       setIdMapping: (mapping) => set({ idMapping: mapping }),
       mergeIdMapping: (mapping) => {
         const next = { ...get().idMapping, ...mapping };
@@ -62,7 +76,9 @@ export const useDashboardStore = create<DashboardState>()(
     {
       name: "conversation-quality-dashboard",
       partialize: (state) => ({
-        deAnonymize: state.deAnonymize
+        deAnonymize: state.deAnonymize,
+        settings: state.settings,
+        debugLLM: state.debugLLM
       })
     }
   )

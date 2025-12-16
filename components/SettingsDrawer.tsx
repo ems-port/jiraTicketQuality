@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { ChangeEvent } from "react";
 
+import { PROJECT_PROMPT_TYPES, PromptConfigType } from "@/lib/defaultProjectConfig";
 import { SettingsState } from "@/types";
 
 type SettingsDrawerProps = {
@@ -10,6 +11,25 @@ type SettingsDrawerProps = {
   onChange: (next: SettingsState) => void;
   useOnlineData: boolean;
   onToggleDataSource: (value: boolean) => void;
+  promptConfigs: Record<PromptConfigType, string>;
+  onPromptChange: (type: PromptConfigType, value: string) => void;
+  onPromptSave: (type: PromptConfigType) => Promise<void> | void;
+  promptConfigSaving: PromptConfigType | null;
+  promptConfigError: string | null;
+  promptConfigLoading: boolean;
+  promptConfigMeta: Record<PromptConfigType, { version: number; updated_at?: string | null; updated_by?: string | null }>;
+  onReloadConfigs: () => void;
+  taxonomyLabels: string[];
+  taxonomyMeta: { version: number; updated_at?: string | null; updated_by?: string | null };
+  taxonomySaving: boolean;
+  taxonomyError: string | null;
+  taxonomyLoading: boolean;
+  taxonomyStatus: "NEW" | "IN_USE" | "OBSOLETED" | "CANCELLED";
+  onTaxonomyChange: (index: number, value: string) => void;
+  onTaxonomyAddRow: () => void;
+  onTaxonomyRemoveRow: (index: number) => void;
+  onTaxonomySave: () => void;
+  onTaxonomyStatusChange: (status: "NEW" | "IN_USE" | "OBSOLETED" | "CANCELLED") => void;
 };
 
 export function SettingsDrawer({
@@ -18,7 +38,26 @@ export function SettingsDrawer({
   onClose,
   onChange,
   useOnlineData,
-  onToggleDataSource
+  onToggleDataSource,
+  promptConfigs,
+  onPromptChange,
+  onPromptSave,
+  promptConfigSaving,
+  promptConfigError,
+  promptConfigLoading,
+  promptConfigMeta,
+  onReloadConfigs,
+  taxonomyLabels,
+  taxonomyMeta,
+  taxonomySaving,
+  taxonomyError,
+  taxonomyLoading,
+  taxonomyStatus,
+  onTaxonomyChange,
+  onTaxonomyAddRow,
+  onTaxonomyRemoveRow,
+  onTaxonomySave,
+  onTaxonomyStatusChange
 }: SettingsDrawerProps) {
   if (!open) {
     return null;
@@ -106,6 +145,131 @@ export function SettingsDrawer({
             step={1}
             onChange={handleNumberChange("min_msgs_for_toxicity")}
           />
+          <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold text-white">Project configurations</p>
+                <p className="text-xs text-slate-400">
+                  Edit the prompts used for scoring and instructions. Changes publish to Supabase.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onReloadConfigs}
+                disabled={promptConfigLoading}
+                className="rounded-lg border border-slate-700 px-3 py-1 text-xs font-semibold text-slate-200 transition hover:border-brand-500 hover:text-brand-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+              >
+                {promptConfigLoading ? "Refreshing…" : "Refresh"}
+              </button>
+            </div>
+            {promptConfigError && (
+              <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                {promptConfigError}
+              </p>
+            )}
+            <div className="space-y-3">
+              {PROJECT_PROMPT_TYPES.map((type) => (
+                <PromptEditor
+                  key={type}
+                  type={type}
+                  value={promptConfigs[type]}
+                  meta={promptConfigMeta[type]}
+                  saving={promptConfigSaving === type}
+                  onChange={(value) => onPromptChange(type, value)}
+                  onSave={() => onPromptSave(type)}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-white">Contact taxonomy</p>
+                  <p className="text-xs text-slate-400">
+                    Manage the list of contact reason labels used in scoring.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-400">
+                    Status
+                    <select
+                      className="ml-2 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-200 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                      value={taxonomyStatus}
+                      onChange={(event) =>
+                        onTaxonomyStatusChange(event.target.value as "NEW" | "IN_USE" | "OBSOLETED" | "CANCELLED")
+                      }
+                    >
+                      <option value="NEW">NEW</option>
+                      <option value="IN_USE">IN_USE</option>
+                      <option value="OBSOLETED">OBSOLETED</option>
+                      <option value="CANCELLED">CANCELLED</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={onTaxonomyAddRow}
+                    className="rounded-lg border border-slate-700 px-3 py-1 text-xs font-semibold text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
+                  >
+                    Add row
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onTaxonomySave}
+                    disabled={taxonomySaving}
+                    className="rounded-lg border border-brand-500/60 px-3 py-1 text-xs font-semibold text-brand-100 transition hover:bg-brand-500/10 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+                  >
+                    {taxonomySaving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              </div>
+            {taxonomyError && (
+              <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                {taxonomyError}
+              </p>
+            )}
+            <div className="rounded-lg border border-slate-800">
+              <div className="grid grid-cols-[1fr_auto] items-center gap-2 border-b border-slate-800 bg-slate-900/60 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                <span>Label</span>
+                <span>Actions</span>
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {taxonomyLabels.map((label, index) => (
+                  <div
+                    key={`${label}-${index}`}
+                    className="grid grid-cols-[1fr_auto] items-center gap-2 border-b border-slate-900/50 px-3 py-2"
+                  >
+                    <input
+                      type="text"
+                      value={label}
+                      onChange={(event) => onTaxonomyChange(index, event.target.value)}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-2 py-1 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => onTaxonomyRemoveRow(index)}
+                      className="rounded-lg border border-slate-700 px-2 py-1 text-xs font-semibold text-slate-300 transition hover:border-red-500 hover:text-red-200"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                {taxonomyLoading && (
+                  <div className="px-3 py-2 text-xs text-slate-400">Loading taxonomy…</div>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-slate-500">
+              <span>
+                v{taxonomyMeta?.version ?? 1} · {taxonomyStatus}
+              </span>
+              {taxonomyMeta?.updated_at && (
+                <span>
+                  Updated {new Date(taxonomyMeta.updated_at).toLocaleString()}
+                  {taxonomyMeta?.updated_by ? ` by ${taxonomyMeta.updated_by}` : ""}
+                </span>
+              )}
+            </div>
+          </div>
         </div>
       </aside>
     </div>
@@ -139,5 +303,74 @@ function SettingField({ label, description, value, min, max, step, onChange }: S
         onChange={onChange}
       />
     </label>
+  );
+}
+
+type PromptEditorProps = {
+  type: PromptConfigType;
+  value: string;
+  onChange: (value: string) => void;
+  onSave: () => void;
+  saving: boolean;
+  meta?: { version?: number; updated_at?: string | null; updated_by?: string | null };
+};
+
+const PROMPT_LABELS: Record<PromptConfigType, { title: string; description: string }> = {
+  task_sequence: {
+    title: "Task sequence",
+    description: "Ordered steps the model must follow for each conversation."
+  },
+  additional_instructions: {
+    title: "Additional instructions",
+    description: "Tone, formatting, and validation reminders."
+  },
+  conversation_rating: {
+    title: "Conversation rating",
+    description: "Scoring rubric for conversation_rating."
+  },
+  agent_score: {
+    title: "Agent score",
+    description: "Scoring rubric for agent_score."
+  },
+  customer_score: {
+    title: "Customer score",
+    description: "Scoring rubric for customer_score."
+  }
+};
+
+function PromptEditor({ type, value, onChange, onSave, saving, meta }: PromptEditorProps) {
+  const labels = PROMPT_LABELS[type];
+  const updatedAt = meta?.updated_at ? new Date(meta.updated_at).toLocaleString() : null;
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-white">{labels.title}</p>
+          <p className="text-xs text-slate-400">{labels.description}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving}
+          className="rounded-lg border border-brand-500/60 px-3 py-1 text-xs font-semibold text-brand-100 transition hover:bg-brand-500/10 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+      <textarea
+        className="mt-3 h-40 w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+        <span>v{meta?.version ?? 1}</span>
+        {updatedAt && (
+          <span>
+            Updated {updatedAt}
+            {meta?.updated_by ? ` by ${meta.updated_by}` : ""}
+          </span>
+        )}
+      </div>
+    </div>
   );
 }

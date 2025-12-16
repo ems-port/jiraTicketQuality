@@ -1,11 +1,10 @@
 """
-Shared taxonomy definitions for contact reasons.
+Default contact taxonomy definitions used as a fallback when Supabase is unavailable.
 """
 
 from __future__ import annotations
 
 from typing import Dict, Tuple
-
 
 AGENT_CONTACT_HEADINGS: Tuple[str, ...] = (
     "System outage",
@@ -45,9 +44,7 @@ AGENT_CONTACT_HEADINGS: Tuple[str, ...] = (
     "Answer from customer to Port outbound contact",
 )
 
-
 DEFAULT_CONTACT_REASON = "Other"
-
 
 KEYWORD_CONTACT_MAP: Dict[str, Tuple[str, ...]] = {
     "System outage": (
@@ -200,52 +197,14 @@ KEYWORD_CONTACT_MAP: Dict[str, Tuple[str, ...]] = {
     ),
     "Info about advanced booking": (
         "advanced booking",
-        "book in advance",
-        "reserve ahead",
-        "pre book",
-        "prebook ride",
+        "prebook",
+        "book bike",
+        "reserve bike",
     ),
-    "Delete account": (
-        "delete account",
-        "remove my account",
-        "close my account",
-        "account deletion",
-    ),
-    "Invoice or receipt request": (
-        "invoice",
-        "receipt",
-        "billing statement",
-        "tax invoice",
-        "proof of payment",
-    ),
-    "Promotions or discounts question / issue": (
-        "promotion",
-        "discount",
-        "promo code",
-        "voucher",
-        "coupon",
-    ),
-    "Login / signup issue": (
-        "login issue",
-        "log in issue",
-        "can't log in",
-        "signin issue",
-        "sign in issue",
-        "sign up issue",
-        "signup issue",
-        "password issue",
-    ),
-    "Info about monthly subscription": (
-        "monthly subscription",
-        "monthly pass",
-        "month pass info",
-        "monthly plan",
-    ),
-    "Answer from customer to Port outbound contact": (
-        "responding to port",
-        "replying to message",
-        "answering your outreach",
-        "outbound message response",
-        "reply to your email",
-    ),
+    "Delete account": ("delete account", "remove account", "close account"),
+    "Invoice or receipt request": ("invoice", "receipt", "tax receipt", "proof of payment"),
+    "Promotions or discounts question / issue": ("promo", "discount", "coupon", "code not working"),
+    "Login / signup issue": ("login", "signup", "sign up", "cannot log in"),
+    "Info about monthly subscription": ("monthly subscription", "monthly pass", "monthly plan"),
+    "Answer from customer to Port outbound contact": ("reply to port", "response to port message"),
 }

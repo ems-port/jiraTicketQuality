@@ -86,6 +86,13 @@ def parse_args() -> argparse.Namespace:
         help="Number of parallel threads for LLM processing (default: 12).",
     )
     parser.add_argument("--dry-run", action="store_true", help="Compute results but do not write to Supabase.")
+    parser.add_argument("--debug", action="store_true", help="Print LLM input/output for troubleshooting.")
+    parser.add_argument(
+        "--debug-prompts",
+        default="none",
+        choices=["none", "input", "output", "both"],
+        help="Which prompts to print when --debug is enabled (default: none).",
+    )
     return parser.parse_args()
 
 
@@ -103,6 +110,9 @@ class ProcessorConfig:
     use_llm: bool
     dry_run: bool
     concurrency: int
+    debug: bool
+    debug_prompts: str
+    prompt_sections: Dict[str, str]
 
 
 class ConversationProcessingError(Exception):
@@ -267,6 +277,9 @@ create table if not exists public.jira_processed_conversations (
     issue_key text primary key,
     status text,
     resolution text,
+    rental_id text,
+    bike_qr_code text,
+    bike_qr_mismatch text,
     custom_field_hub text,
     conversation_start timestamptz,
     conversation_end timestamptz,
@@ -335,6 +348,9 @@ def row_to_record(row: Dict[str, str]) -> Dict[str, Any]:
         "issue_key": row.get("issue_key") or None,
         "status": row.get("status") or None,
         "resolution": row.get("resolution") or None,
+        "rental_id": row.get("rental_id") or None,
+        "bike_qr_code": row.get("bike_qr_code") or None,
+        "bike_qr_mismatch": row.get("bike_qr_mismatch") or None,
         "custom_field_hub": row.get("custom_field_hub") or None,
         "conversation_start": to_timestamp(row.get("conversation_start", "")),
         "conversation_end": to_timestamp(row.get("conversation_end", "")),
@@ -387,6 +403,7 @@ def _process_payload_worker(
     openai_client: Optional[tuple[str, Any]],
     taxonomy: Sequence[str],
     max_attempts: int,
+    prompt_sections: Dict[str, str],
 ) -> tuple[str, Dict[str, Any]]:
     # Introduce a small randomized delay to reduce simultaneous API calls.
     time.sleep(random.uniform(0, 0.5))
@@ -405,6 +422,10 @@ def _process_payload_worker(
                 openai_client=openai_client,
                 taxonomy=taxonomy,
                 use_llm=config.use_llm,
+                debug=config.debug,
+                debug_input=config.debug_prompts in {"input", "both"},
+                debug_output=config.debug_prompts in {"output", "both"},
+                prompt_sections=prompt_sections,
             )
             record = row_to_record(row)
             record["issue_key"] = issue_key
@@ -442,12 +463,18 @@ def process_record(
     openai_client: Optional[tuple[str, Any]],
     taxonomy: Sequence[str],
     use_llm: bool,
+    debug: bool,
+    debug_input: bool,
+    debug_output: bool,
+    prompt_sections: Dict[str, str],
 ) -> Dict[str, str]:
     comments_raw = payload.get("comments") or []
     comments = cq.parse_comments(comments_raw if isinstance(comments_raw, list) else [])
     metrics = cq.compute_metrics(comments)
     transcript = cq.build_transcript(comments)
-    system_prompt, user_prompt = cq.build_llm_prompts(payload, metrics, transcript, taxonomy)
+    system_prompt, user_prompt = cq.build_llm_prompts(
+        payload, metrics, transcript, taxonomy, prompt_sections
+    )
 
     llm_payload: Optional[Dict[str, Any]] = None
     prompt_tokens: Optional[int] = None
@@ -470,9 +497,9 @@ def process_record(
             max_completion_tokens=max_output_tokens,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            debug=False,
-            debug_input=False,
-            debug_output=False,
+            debug=debug,
+            debug_input=debug_input,
+            debug_output=debug_output,
         )
         if error_msg or not llm_payload:
             logging.warning(
@@ -505,10 +532,20 @@ def main() -> int:
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
 
+    debug_prompts_choice = args.debug_prompts or "none"
+    if args.debug and debug_prompts_choice == "none":
+        debug_prompts_choice = "both"
+
     supabase_url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not supabase_url or not supabase_key:
         raise SystemExit("Missing SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) / SUPABASE_SERVICE_ROLE_KEY in environment.")
+
+    try:
+        prompt_sections = cq.load_prompt_sections_or_raise()
+    except Exception as exc:
+        logging.error("Failed to load prompt sections from Supabase: %s", exc)
+        return 1
 
     config = ProcessorConfig(
         supabase_url=supabase_url,
@@ -523,6 +560,9 @@ def main() -> int:
         use_llm=not args.no_llm,
         dry_run=bool(args.dry_run),
         concurrency=max(1, args.concurrency),
+        debug=bool(args.debug),
+        debug_prompts=debug_prompts_choice,
+        prompt_sections=prompt_sections,
     )
 
     ensure_processed_table(os.getenv("SUPABASE_DB_URL"))
@@ -566,6 +606,7 @@ def main() -> int:
                 openai_client,
                 taxonomy,
                 max_attempts_per_issue,
+                prompt_sections,
             )] = (payload.get("issue_key") or "").strip()
 
     aborted = False

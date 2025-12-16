@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Papa from "papaparse";
 import type { GetStaticProps } from "next";
 import clsx from "clsx";
+import Link from "next/link";
 
 import { AgentMatrixHeatmap } from "@/components/AgentMatrixHeatmap";
 import { AgentRankList } from "@/components/AgentRankList";
@@ -13,7 +14,6 @@ import { DrilldownTable } from "@/components/DrilldownTable";
 import { KPICard } from "@/components/KPICard";
 import { ManagerReviewPanel } from "@/components/ManagerReviewPanel";
 import { TipsOfTheDayPanel } from "@/components/TipsOfTheDayPanel";
-import { SettingsDrawer } from "@/components/SettingsDrawer";
 import { TipsDrilldownModal } from "@/components/TipsDrilldownModal";
 import { TicketVolumePanel } from "@/components/TicketVolumePanel";
 import { ToxicityList } from "@/components/ToxicityList";
@@ -34,6 +34,8 @@ import {
   filterByWindow,
   normaliseRows
 } from "@/lib/metrics";
+import { DEFAULT_PROJECT_CONFIG, PROJECT_PROMPT_TYPES, PromptConfigType } from "@/lib/defaultProjectConfig";
+import { DEFAULT_CONTACT_TAXONOMY } from "@/lib/defaultContactTaxonomy";
 import { isEscalated } from "@/lib/escalations";
 import { normalizeAgentRole, resolveAgentRole, formatRoleLabel } from "@/lib/roles";
 import { useDashboardStore } from "@/lib/useDashboardStore";
@@ -45,7 +47,6 @@ import type {
   EscalationMetricKind,
   EscalationSeriesEntry,
   MetricSeries,
-  SettingsState,
   TimeWindow
 } from "@/types";
 
@@ -66,12 +67,6 @@ const ROLE_FILTERS: AgentRole[] = ["TIER1", "TIER2", "NON_AGENT"];
 const SAMPLE_DATA_ENDPOINT = "/api/sample-data";
 const ROLE_DATA_ENDPOINT = "/api/roles";
 const REFRESH_ENDPOINT = "/api/refresh-data";
-
-const DEFAULT_SETTINGS: SettingsState = {
-  toxicity_threshold: 0.8,
-  abusive_caps_trigger: 5,
-  min_msgs_for_toxicity: 3
-};
 
 type RefreshJobStage = "idle" | "ingesting" | "processing" | "completed" | "error";
 
@@ -134,8 +129,28 @@ export default function DashboardPage({
   const [roleFilter, setRoleFilter] = useState<AgentRole | "All">("All");
   const [hubFilter, setHubFilter] = useState("All");
   const [escalationMetric, setEscalationMetric] = useState<EscalationMetricKind>("tier");
-  const [settings, setSettings] = useState<SettingsState>(DEFAULT_SETTINGS);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const settings = useDashboardStore((state) => state.settings);
+  const setSettings = useDashboardStore((state) => state.setSettings);
+  const debugLLM = useDashboardStore((state) => state.debugLLM);
+  const setDebugLLM = useDashboardStore((state) => state.setDebugLLM);
+  const [promptConfigs, setPromptConfigs] = useState<Record<PromptConfigType, string>>(() =>
+    PROJECT_PROMPT_TYPES.reduce(
+      (acc, type) => ({ ...acc, [type]: DEFAULT_PROJECT_CONFIG[type] }),
+      {} as Record<PromptConfigType, string>
+    )
+  );
+  const [promptConfigMeta, setPromptConfigMeta] = useState<
+    Record<PromptConfigType, { version: number; updated_at?: string | null; updated_by?: string | null }>
+  >({});
+  const [promptConfigError, setPromptConfigError] = useState<string | null>(null);
+  const [promptConfigLoading, setPromptConfigLoading] = useState(false);
+  const [savingPromptType, setSavingPromptType] = useState<PromptConfigType | null>(null);
+  const [taxonomyLabels, setTaxonomyLabels] = useState<string[]>(DEFAULT_CONTACT_TAXONOMY);
+  const [taxonomyMeta, setTaxonomyMeta] = useState<{ version: number; updated_at?: string | null; updated_by?: string | null }>({ version: 1 });
+  const [taxonomySaving, setTaxonomySaving] = useState(false);
+  const [taxonomyError, setTaxonomyError] = useState<string | null>(null);
+  const [taxonomyLoading, setTaxonomyLoading] = useState(false);
+  const [taxonomyStatus, setTaxonomyStatus] = useState<"NEW" | "IN_USE" | "OBSOLETED" | "CANCELLED">("IN_USE");
   const [drilldownState, setDrilldownState] = useState<DrilldownState>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [mappingError, setMappingError] = useState<string | null>(null);
@@ -153,9 +168,88 @@ export default function DashboardPage({
   const initialRoleLoadAttemptedRef = useRef(false);
   const lastRefreshCompletionRef = useRef<number | null>(null);
 
+  const loadPromptConfigs = useCallback(async () => {
+    setPromptConfigLoading(true);
+    setTaxonomyLoading(true);
+    setPromptConfigError(null);
+    setTaxonomyError(null);
+    try {
+      const promptResponse = await fetch(`/api/project-config?types=${PROJECT_PROMPT_TYPES.join(",")}`);
+      if (!promptResponse.ok) {
+        throw new Error(`Failed to load project configs (${promptResponse.status})`);
+      }
+      const promptBody = await promptResponse.json();
+      const entries = Array.isArray(promptBody.entries) ? promptBody.entries : [];
+      setPromptConfigs((prev) => {
+        const next = { ...prev };
+        PROJECT_PROMPT_TYPES.forEach((type) => {
+          const entry = entries.find((item: any) => item?.type === type);
+          if (entry && typeof entry.payload === "string") {
+            next[type] = entry.payload;
+          } else if (!next[type]) {
+            next[type] = DEFAULT_PROJECT_CONFIG[type];
+          }
+        });
+        return next;
+      });
+      setPromptConfigMeta((prev) => {
+        const meta = { ...prev };
+        PROJECT_PROMPT_TYPES.forEach((type) => {
+          const entry = entries.find((item: any) => item?.type === type);
+          if (entry) {
+            meta[type] = {
+              version: entry.version ?? meta[type]?.version ?? 1,
+              updated_at: entry.updated_at ?? meta[type]?.updated_at ?? null,
+              updated_by: entry.updated_by ?? meta[type]?.updated_by ?? null
+            };
+          }
+        });
+        return meta;
+      });
+      const taxonomyResponse = await fetch("/api/contact-taxonomy");
+      if (taxonomyResponse.ok) {
+        const taxonomyBody = await taxonomyResponse.json();
+        const taxonomy = taxonomyBody?.taxonomy;
+        if (taxonomy?.labels && Array.isArray(taxonomy.labels)) {
+          setTaxonomyLabels(
+            taxonomy.labels.filter((label: unknown) => typeof label === "string" && label.trim().length > 0)
+          );
+          setTaxonomyMeta({
+            version: taxonomy.version ?? 1,
+            updated_at: taxonomy.created_at ?? null,
+            updated_by: taxonomy.created_by ?? null
+          });
+          if (typeof taxonomy.status === "string") {
+            const status = taxonomy.status.toUpperCase();
+            setTaxonomyStatus(
+              status === "NEW" || status === "IN_USE" || status === "OBSOLETED" || status === "CANCELLED"
+                ? (status as typeof taxonomyStatus)
+                : "IN_USE"
+            );
+          }
+        }
+      } else {
+        setTaxonomyLabels(DEFAULT_CONTACT_TAXONOMY);
+        setTaxonomyMeta({ version: 1 });
+        setTaxonomyStatus("IN_USE");
+      }
+    } catch (error) {
+      const message = (error as Error).message ?? "Unable to load project configuration.";
+      setPromptConfigError(message);
+      setTaxonomyError(message);
+    } finally {
+      setPromptConfigLoading(false);
+      setTaxonomyLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     setIdMapping({});
   }, [setIdMapping]);
+
+  useEffect(() => {
+    void loadPromptConfigs();
+  }, [loadPromptConfigs]);
 
   const loadSampleData = useCallback(async () => {
     initialLoadAttemptedRef.current = true;
@@ -271,7 +365,11 @@ export default function DashboardPage({
 
   const handleFetchData = useCallback(async () => {
     try {
-      const response = await fetch(REFRESH_ENDPOINT, { method: "POST" });
+      const response = await fetch(`${REFRESH_ENDPOINT}?debug=${debugLLM ? "1" : "0"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ debug: debugLLM })
+      });
       const payload = (await response.json()) as RefreshJobState | { error: string };
       if (response.status === 409 || response.status === 202) {
         setRefreshState(payload as RefreshJobState);
@@ -288,7 +386,7 @@ export default function DashboardPage({
     } finally {
       void fetchRefreshStatus();
     }
-  }, [fetchRefreshStatus, surfaceRefreshError]);
+  }, [fetchRefreshStatus, surfaceRefreshError, debugLLM]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -684,6 +782,91 @@ export default function DashboardPage({
     setMappingError(null);
   }, [setIdMapping]);
 
+  const handlePromptChange = useCallback((type: PromptConfigType, value: string) => {
+    setPromptConfigs((prev) => ({ ...prev, [type]: value }));
+  }, []);
+
+  const handlePromptSave = useCallback(
+    async (type: PromptConfigType) => {
+      setSavingPromptType(type);
+      setPromptConfigError(null);
+      try {
+        const response = await fetch("/api/project-config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type, payload: promptConfigs[type], updated_by: "dashboard_ui" })
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || "Unable to save project configuration.");
+        }
+        const body = await response.json();
+        const entry = body.entry;
+        setPromptConfigMeta((prev) => ({
+          ...prev,
+          [type]: {
+            version: entry?.version ?? (prev[type]?.version ?? 1),
+            updated_at: entry?.updated_at ?? new Date().toISOString(),
+            updated_by: entry?.updated_by ?? "dashboard_ui"
+          }
+        }));
+      } catch (error) {
+        setPromptConfigError((error as Error).message ?? "Unable to save project configuration.");
+      } finally {
+        setSavingPromptType(null);
+      }
+    },
+    [promptConfigs]
+  );
+
+  const handleTaxonomyLabelChange = useCallback((index: number, value: string) => {
+    setTaxonomyLabels((prev) => prev.map((label, idx) => (idx === index ? value : label)));
+  }, []);
+
+  const handleTaxonomyAddRow = useCallback(() => {
+    setTaxonomyLabels((prev) => [...prev, ""]);
+  }, []);
+
+  const handleTaxonomyRemoveRow = useCallback((index: number) => {
+    setTaxonomyLabels((prev) => prev.filter((_, idx) => idx !== index));
+  }, []);
+
+  const handleTaxonomySave = useCallback(async () => {
+    setTaxonomySaving(true);
+    setTaxonomyError(null);
+    try {
+      const cleaned = taxonomyLabels.map((label) => label.trim()).filter((label) => label.length > 0);
+      if (!cleaned.length) {
+        throw new Error("Provide at least one contact taxonomy label.");
+      }
+      const response = await fetch("/api/contact-taxonomy", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ labels: cleaned, created_by: "dashboard_ui", status: taxonomyStatus })
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || "Unable to save contact taxonomy.");
+      }
+      const body = await response.json();
+      const entry = body.taxonomy;
+      setTaxonomyMeta({
+        version: entry?.version ?? taxonomyMeta.version ?? 1,
+        updated_at: entry?.created_at ?? new Date().toISOString(),
+        updated_by: entry?.created_by ?? "dashboard_ui"
+      });
+    } catch (error) {
+      setTaxonomyError((error as Error).message ?? "Unable to save contact taxonomy.");
+    } finally {
+      setTaxonomySaving(false);
+    }
+  }, [taxonomyLabels, taxonomyMeta]);
+
+  const handleTaxonomyStatusChange = useCallback(
+    (status: "NEW" | "IN_USE" | "OBSOLETED" | "CANCELLED") => setTaxonomyStatus(status),
+    []
+  );
+
   const persistAgentDirectory = async (
     nextDirectory: Record<string, { displayName: string; role: AgentRole }>,
     nextOrder: string[]
@@ -817,13 +1000,12 @@ export default function DashboardPage({
                   >
                     Manager review
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsSettingsOpen(true)}
+                  <Link
+                    href="/settings"
                     className="rounded-full border border-slate-700 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-brand-500 hover:text-brand-200"
                   >
                     Settings
-                  </button>
+                  </Link>
                 </div>
                 <button
                   type="button"
@@ -1182,14 +1364,6 @@ export default function DashboardPage({
         roleMapping={roleMapping}
       />
 
-      <SettingsDrawer
-        open={isSettingsOpen}
-        settings={settings}
-        onClose={() => setIsSettingsOpen(false)}
-        onChange={setSettings}
-        useOnlineData={useOnlineData}
-        onToggleDataSource={setUseOnlineData}
-      />
       <ManagerReviewPanel
         open={isManagerReviewOpen}
         onClose={() => setIsManagerReviewOpen(false)}

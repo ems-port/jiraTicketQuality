@@ -1,6 +1,4 @@
-drop table if exists public.jira_processed_conversations cascade;
-drop table if exists public.jira_prepared_conversations cascade;
-drop table if exists public.jira_ingest_raw cascade;
+
 
 create table if not exists public.jira_prepared_conversations (
     issue_key text primary key,
@@ -23,6 +21,9 @@ create table if not exists public.jira_processed_conversations (
     issue_key text primary key,
     status text,
     resolution text,
+    rental_id text,
+    bike_qr_code text,
+    bike_qr_mismatch text,
     custom_field_hub text,
     conversation_start timestamptz,
     conversation_end timestamptz,
@@ -84,3 +85,71 @@ create table if not exists public.misclassification_reviews (
 
 create index if not exists idx_misclassification_reviews_issue on public.misclassification_reviews (issue_key);
 create index if not exists idx_misclassification_reviews_user on public.misclassification_reviews (user_id);
+
+-- Project-level configurable prompts and lookups
+create table if not exists public.project_config (
+    id uuid primary key default gen_random_uuid(),
+    type text not null,
+    payload jsonb not null,
+    version integer not null default 1,
+    checksum text,
+    is_active boolean not null default true,
+    created_at timestamptz not null default timezone('utc', now()),
+    updated_at timestamptz not null default timezone('utc', now()),
+    updated_by text,
+    constraint project_config_type_unique unique (type)
+);
+
+create unique index if not exists idx_project_config_type_active on public.project_config (type) where is_active;
+create index if not exists idx_project_config_updated_at on public.project_config (updated_at desc);
+
+-- History snapshots for project_config (retain previous versions)
+create table if not exists public.project_config_history (
+    id uuid primary key default gen_random_uuid(),
+    project_config_id uuid,
+    type text not null,
+    payload jsonb not null,
+    version integer not null,
+    checksum text,
+    created_at timestamptz not null default timezone('utc', now()),
+    updated_by text
+);
+create index if not exists idx_project_config_history_type on public.project_config_history (type);
+create index if not exists idx_project_config_history_created_at on public.project_config_history (created_at desc);
+
+create table if not exists public.contact_taxonomy_versions (
+    id uuid primary key default gen_random_uuid(),
+    version integer not null default 1,
+    notes text,
+    status text not null default 'NEW' check (status in ('NEW', 'IN_USE', 'OBSOLETED', 'CANCELLED')),
+    created_at timestamptz not null default timezone('utc', now()),
+    created_by text
+);
+
+create unique index if not exists idx_contact_taxonomy_in_use on public.contact_taxonomy_versions (status) where status = 'IN_USE';
+create index if not exists idx_contact_taxonomy_version on public.contact_taxonomy_versions (version desc);
+create index if not exists idx_contact_taxonomy_created_at on public.contact_taxonomy_versions (created_at desc);
+
+-- Individual contact taxonomy reasons (one row per topic/sub-reason)
+create table if not exists public.contact_taxonomy_reasons (
+    id uuid primary key default gen_random_uuid(),
+    version_id uuid not null references public.contact_taxonomy_versions(id) on delete cascade,
+    topic text not null,
+    sub_reason text,
+    description text,
+    keywords text[],
+    sort_order integer not null default 0,
+    status text not null default 'IN_USE' check (status in ('NEW', 'IN_USE', 'OBSOLETED', 'CANCELLED')),
+    created_at timestamptz not null default timezone('utc', now())
+);
+
+alter table if exists public.contact_taxonomy_reasons
+    add column if not exists status text not null default 'IN_USE' check (status in ('NEW', 'IN_USE', 'OBSOLETED', 'CANCELLED'));
+
+create index if not exists idx_contact_taxonomy_reasons_version on public.contact_taxonomy_reasons (version_id);
+create index if not exists idx_contact_taxonomy_reasons_order on public.contact_taxonomy_reasons (version_id, sort_order);
+create index if not exists idx_contact_taxonomy_reasons_status on public.contact_taxonomy_reasons (status);
+create unique index if not exists idx_contact_taxonomy_reason_unique on public.contact_taxonomy_reasons (version_id, topic, coalesce(sub_reason, ''));
+
+-- Cleanup legacy column if present
+alter table if exists public.contact_taxonomy_versions drop column if exists labels;

@@ -12,6 +12,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import logging
 import os
 import re
 import sys
@@ -34,7 +35,7 @@ KEYWORD_CONTACT_MAP: Dict[str, Sequence[str]] = {}
 AGENT_CONTACT_HEADINGS: Sequence[str] = ()
 
 try:
-    from contact_taxonomy import (  # type: ignore
+    from analysis.default_taxonomy import (  # type: ignore
         AGENT_CONTACT_HEADINGS as _AGENT_CONTACT_HEADINGS,
         KEYWORD_CONTACT_MAP as _KEYWORD_CONTACT_MAP,
     )
@@ -43,27 +44,23 @@ try:
     KEYWORD_CONTACT_MAP = dict(_KEYWORD_CONTACT_MAP)
 except ImportError:
     try:
-        from analysis.contact_taxonomy import (  # type: ignore
-            AGENT_CONTACT_HEADINGS as _AGENT_CONTACT_HEADINGS,
-            KEYWORD_CONTACT_MAP as _KEYWORD_CONTACT_MAP,
-        )
-
-        AGENT_CONTACT_HEADINGS = _AGENT_CONTACT_HEADINGS
-        KEYWORD_CONTACT_MAP = dict(_KEYWORD_CONTACT_MAP)
+        from default_taxonomy import AGENT_CONTACT_HEADINGS as _AGENT_CONTACT_HEADINGS  # type: ignore
     except ImportError:
-        fallback_path = Path(__file__).resolve().parent / "analysis" / "contact_taxonomy.py"
-        if fallback_path.exists():
-            spec = importlib.util.spec_from_file_location("contact_taxonomy_fallback", fallback_path)
-            if spec and spec.loader:
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                AGENT_CONTACT_HEADINGS = getattr(module, "AGENT_CONTACT_HEADINGS", ())
-                KEYWORD_CONTACT_MAP = dict(getattr(module, "KEYWORD_CONTACT_MAP", {}))
+        AGENT_CONTACT_HEADINGS = ()
+    KEYWORD_CONTACT_MAP = {}
 
 try:  # pragma: no cover - optional dependency
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional dependency
     load_dotenv = None  # type: ignore
+
+try:
+    from analysis.project_config import ProjectConfigStore  # type: ignore
+except ImportError:
+    try:
+        from project_config import ProjectConfigStore  # type: ignore
+    except ImportError:
+        ProjectConfigStore = None  # type: ignore
 
 
 def _load_dotenv_if_available() -> None:
@@ -118,6 +115,10 @@ def format_taxonomy_block(taxonomy: Sequence[str], hints_per_label: int) -> str:
                     entry = f"{entry}: {', '.join(unique)}"
         lines.append(entry)
     return "\n".join(lines)
+
+
+def _dedent(text: str) -> str:
+    return textwrap.dedent(text).strip()
 
 
 def _extract_json_payload(content: str) -> Dict[str, Any]:
@@ -198,6 +199,100 @@ def _coerce_int(value: Any) -> Optional[int]:
         except ValueError:
             return None
     return None
+
+
+PROMPT_HEADER = _dedent(
+    """
+    Review the conversation above and respond with a SINGLE JSON object that satisfies the schema below.
+    """
+)
+
+PROMPT_JSON_SCHEMA = _dedent(
+    """
+    {
+      "llm_summary_250": string (<=150 chars),
+      "conversation_rating": integer (1-5),
+      "extract_customer_probelm": string (mirror of problem_extract),
+      "problem_extract": string (<=150 chars),
+      "resolution_extract": string (<=150 chars),
+      "contact_reason": string from taxonomy (or "Other"),
+      "contact_reason_change": boolean,
+      "reason_override_why": string (<=300 chars, cite transcript cues when contact_reason_change=true; use empty string when no change),
+      "agent_score": integer (1-5),
+      "customer_score": integer (1-5),
+      "resolved": boolean,
+      "is_resolved": boolean,
+      "resolution_why": string (<=300 chars, factual rationale for resolved/unresolved),
+      "steps_extract": array of strings,
+      "resolution_timestamp_iso": string | null (ISO 8601 for the resolution moment, null if unresolved),
+      "resolution_message_index": integer | null (1-based index of the decisive message, null if unresolved),
+      "customer_sentiment_primary": one of the eight labels listed above,
+      "customer_sentiment_scores": {
+        "Delight": number,
+        "Convenience": number,
+        "Trust": number,
+        "Frustration": number,
+        "Disappointment": number,
+        "Concern": number,
+        "Hostility": number,
+        "Neutral": number
+      },
+      "agent_profanity_detected": boolean,
+      "agent_profanity_count": integer (>=0),
+      "customer_abuse_detected": boolean,
+      "customer_abuse_count": integer (>=0),
+      "improvement_tip": string (<=200 chars),
+      "rental_id": string | null,
+      "bike_qr_code": string | null,
+      "bike_qr_mismatch": string | null
+    }
+    """
+)
+
+
+_CONFIG_STORE = ProjectConfigStore() if ProjectConfigStore is not None else None
+_CONFIG_LOG = logging.getLogger("ProjectConfigStore")
+
+
+def load_prompt_sections_or_raise() -> Dict[str, str]:
+    if _CONFIG_STORE is None:
+        raise RuntimeError("ProjectConfigStore is not available; cannot load prompt sections.")
+    # Force refresh to pick up the latest from Supabase; fail loudly on errors.
+    return _CONFIG_STORE.load_prompt_sections_strict()
+
+
+def build_user_prompt_from_sections(sections: Dict[str, str]) -> str:
+    required = (
+        "prompt_header",
+        "prompt_json_schema",
+        "task_sequence",
+        "additional_instructions",
+        "conversation_rating",
+        "agent_score",
+        "customer_score",
+    )
+    missing = [key for key in required if not isinstance(sections.get(key), str) or not sections.get(key).strip()]
+    if missing:
+        raise ValueError(f"Missing prompt section(s): {', '.join(sorted(missing))}")
+
+    prompt_header = sections["prompt_header"]
+    prompt_schema = sections["prompt_json_schema"]
+    task_sequence = sections["task_sequence"]
+    additional_instructions = sections["additional_instructions"]
+    conversation_rating = sections["conversation_rating"]
+    agent_score = sections["agent_score"]
+    customer_score = sections["customer_score"]
+
+    prompt_parts = [
+        prompt_header,
+        task_sequence,
+        prompt_schema,
+        additional_instructions,
+        conversation_rating,
+        agent_score,
+        customer_score,
+    ]
+    return "\n".join(part.strip() for part in prompt_parts if part is not None).strip()
 
 
 def _normalise_steps_field(value: Any) -> List[str]:
@@ -381,6 +476,28 @@ def _normalise_llm_payload(
     ):
         data["conversation_rating"] = conversation_rating
 
+    # Bike QR fields
+    rental_id_value = data.get("rental_id")
+    if rental_id_value is None:
+        data["rental_id"] = None
+    else:
+        rental_text = _stringify(rental_id_value)
+        data["rental_id"] = rental_text or None
+
+    qr_value = data.get("bike_qr_code")
+    if qr_value is None:
+        data["bike_qr_code"] = None
+    else:
+        qr_text = _stringify(qr_value)
+        data["bike_qr_code"] = qr_text or None
+
+    mismatch_value = data.get("bike_qr_mismatch")
+    if mismatch_value is None:
+        data["bike_qr_mismatch"] = None
+    else:
+        mismatch_text = _truncate(_stringify(mismatch_value), MAX_REASON_CHARS)
+        data["bike_qr_mismatch"] = mismatch_text or None
+
     return data
 
 
@@ -418,6 +535,9 @@ CSV_FIELDS: Sequence[str] = (
     "issue_key",
     "status",
     "resolution",
+    "rental_id",
+    "bike_qr_code",
+    "bike_qr_mismatch",
     "custom_field_hub",
     "conversation_start",
     "conversation_end",
@@ -624,6 +744,13 @@ def load_taxonomy(path: Optional[str]) -> Sequence[str]:
                 )
             except json.JSONDecodeError as exc:  # pragma: no cover - invalid file
                 print(f"[warn] failed to parse taxonomy file: {exc}", file=sys.stderr)
+    if _CONFIG_STORE is not None:
+        try:
+            configured = _CONFIG_STORE.get_contact_taxonomy()
+            if configured:
+                return configured
+        except Exception as exc:
+            _CONFIG_LOG.warning("Falling back to default taxonomy: %s", exc)
     return AGENT_CONTACT_HEADINGS
 
 
@@ -934,11 +1061,11 @@ def build_llm_prompts(
     metrics: ConversationMetrics,
     transcript: str,
     taxonomy: Sequence[str],
+    prompt_sections: Dict[str, str],
 ) -> Tuple[str, str]:
-    system_prompt = (
-        "You are a meticulous quality assurance analyst who responds in JSON. "
-        "Conversation transcript lines use 'A:' for agent and 'C:' for customer to optimise tokens."
-    )
+    if not isinstance(prompt_sections.get("system_prompt"), str) or not prompt_sections.get("system_prompt", "").strip():
+        raise ValueError("Missing prompt section: system_prompt")
+    system_prompt = prompt_sections["system_prompt"]
 
     taxonomy_block = format_taxonomy_block(taxonomy, DEFAULT_TAXONOMY_HINTS)
     custom_fields = record.get("custom_fields") if isinstance(record.get("custom_fields"), dict) else {}
@@ -952,6 +1079,8 @@ def build_llm_prompts(
         Issue key: {record.get('issue_key', '')}
         Status: {record.get('status', '')}
         Resolution: {record.get('resolution', '')}
+        Rental ID: {record.get('Rental ID', '') or record.get('rental_id', '') or 'Not provided'}
+        Bike QR Code: {record.get('Bike QR Code', '') or record.get('bike_qr_code', '') or 'Not provided'}
         Conversation start (UTC): {metrics.conversation_start.isoformat() if metrics.conversation_start else 'unknown'}
         Conversation end (UTC): {metrics.conversation_end.isoformat() if metrics.conversation_end else 'unknown'}
         Total messages: {metrics.messages_total}
@@ -967,96 +1096,7 @@ def build_llm_prompts(
         """
     ).strip()
 
-    user_prompt = textwrap.dedent(
-        """
-        Review the conversation above and respond with a SINGLE JSON object that satisfies the schema below.
-
-        Task sequence (complete all steps):
-        1. Compare the customer's stated problem to the agent's classification. If the original contact reason is "Duplicate", keep contact_reason="Duplicate" and contact_reason_change=false. Otherwise, set contact_reason_change=true when your chosen contact_reason differs from the original, and explain the override using literal phrases or timestamps from the transcript.
-        2. Decide whether the conversation is resolved. Set both resolved and is_resolved accordingly, and write resolution_why that cites the agent or customer action that proves the outcome (or why it failed).
-        3. Provide one-sentence summaries:
-           a. problem_extract – concise but specific customer problem (<=250 chars). Mention concrete damage, location, or outage cause.
-           b. resolution_extract – outcome in <15 words explaining how it was solved or why open.
-        4. List chronological agent actions that moved the ticket forward in steps_extract (array of short strings, earliest first, max 8 entries).
-        5. Identify the message where the issue was resolved (customer confirmation or decisive agent fix). Populate resolution_timestamp_iso (ISO 8601) and resolution_message_index (1-based transcript index). Use null for both when unresolved.
-        6. Produce customer sentiment:
-           - customer_sentiment_primary must be one of: Delight, Convenience, Trust, Frustration, Disappointment, Concern, Hostility, Neutral.
-           - customer_sentiment_scores is an object with those eight keys. Values are floats between 0 and 1 that sum to ~1.00 (±0.02 tolerance).
-        7. Generate llm_summary_250 (<=250 chars), conversation_rating/agent_score/customer_score (integers 1-5), improvement_tip (<=200 chars, actionable).
-        8. Detect abuse and profanity: set agent_profanity_detected / agent_profanity_count (agent side) and customer_abuse_detected / customer_abuse_count (customer side). Only count explicit insults, slurs, or profanity pointed at the counterpart/company.
-
-        Strict JSON schema (all fields required, nulls allowed only when noted):
-        {
-          "llm_summary_250": string (<=150 chars),
-          "conversation_rating": integer (1-5),
-          "extract_customer_probelm": string (mirror of problem_extract),
-          "problem_extract": string (<=150 chars),
-          "resolution_extract": string (<=150 chars),
-          "contact_reason": string from taxonomy (or "Other"),
-          "contact_reason_change": boolean,
-          "reason_override_why": string (<=300 chars, cite transcript cues when contact_reason_change=true; use empty string when no change),
-          "agent_score": integer (1-5),
-          "customer_score": integer (1-5),
-          "resolved": boolean,
-          "is_resolved": boolean,
-          "resolution_why": string (<=300 chars, factual rationale for resolved/unresolved),
-          "steps_extract": array of strings,
-          "resolution_timestamp_iso": string | null (ISO 8601 for the resolution moment, null if unresolved),
-          "resolution_message_index": integer | null (1-based index of the decisive message, null if unresolved),
-          "customer_sentiment_primary": one of the eight labels listed above,
-          "customer_sentiment_scores": {
-            "Delight": number,
-            "Convenience": number,
-            "Trust": number,
-            "Frustration": number,
-            "Disappointment": number,
-            "Concern": number,
-            "Hostility": number,
-            "Neutral": number
-          },
-          "agent_profanity_detected": boolean,
-          "agent_profanity_count": integer (>=0),
-          "customer_abuse_detected": boolean,
-          "customer_abuse_count": integer (>=0),
-          "improvement_tip": string (<=200 chars)
-        }
-
-        Additional instructions:
-        - Quote short phrases (e.g., "customer: bike stuck at finish screen") inside reason_override_why and resolution_why to justify decisions.
-        - steps_extract should only describe agent actions or system fixes that move toward resolution; omit chit-chat.
-        - When unresolved, explain the blocker inside resolution_why and set both resolution_timestamp_iso and resolution_message_index to null.
-        - Make resolution_extract under 15 words; problem_extract must stay concise yet include the concrete issue details (what broke, which dock, which outage cause, etc.).
-        - If profanity/abuse counts differ from transcript reality, explain briefly in resolution_why.
-        - Keep tone factual and manager-ready. Return STRICT JSON only—no Markdown or extra commentary.
-        - Scoring scale for conversation_rating, agent_score, and customer_score: 1=Very poor, 2=Poor, 3=Adequate, 4=Good, 5=Excellent.
-
-        Detailed scoring guidance:
-        CONVERSATION_RATING
-        • Primary signals: resolved flag, sentiment at end, proof of closure, avoidable effort.
-        • 5 → resolved=true AND resolution_timestamp_iso provided AND customer_sentiment_primary in {Delight, Convenience, Trust}.
-        • 4 → resolved=true AND customer_sentiment_primary in {Neutral} OR clear shift from Frustration to Neutral; only minor avoidable effort.
-        • 3 → unresolved BUT a clear next step is agreed and no harm done; neutral tone.
-        • 2 → unresolved AND misclassification left uncorrected OR long back-and-forth with little progress.
-        • 1 → incorrect/unsafe guidance, policy breach, or hostility escalation.
-
-        AGENT_SCORE
-        • Primary signals: correct diagnosis/classification, useful actions, ownership, clarity.
-        • 5 → correct contact_reason or justified override; at least two concrete steps_extract; delivers fix or definitive path; clear instructions.
-        • 4 → small miss but corrected; steps_extract present; only minor clarity gaps.
-        • 3 → some helpful action but partial or vague; missed one key step.
-        • 2 → wrong or uncorrected classification OR speculative help with low action density.
-        • 1 → harmful, rude, vulgar, or no actionable help.
-
-        CUSTOMER_SCORE
-        • Primary signals: final customer message, sentiment curve, explicit thanks/relief.
-        • 5 → explicit positive closure (“works now,” “thanks!”) or Delight/Trust sentiment at the end.
-        • 4 → polite thanks without enthusiasm; Neutral at the end.
-        • 3 → neutral acceptance (“ok,” “I’ll try”) without closure proof.
-        • 2 → lingering doubt, mild Frustration/Concern, or abandonment.
-        • 1 → Hostility/Disappointment or vulgar/profane language directed at the agent/company (swearing acceptable only when describing the issue itself).
-        """
-    ).strip()
-
+    user_prompt = build_user_prompt_from_sections(prompt_sections)
     prompt = f"{conversation_meta}\n\n{user_prompt}"
     return system_prompt, prompt
 
@@ -1250,6 +1290,24 @@ def build_request_payload(
                         "customer_abuse_detected": {"type": "boolean"},
                         "customer_abuse_count": {"type": "integer", "minimum": 0},
                         "improvement_tip": {"type": "string", "maxLength": MAX_IMPROVEMENT_TIP_CHARS},
+                        "rental_id": {
+                            "anyOf": [
+                                {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
+                                {"type": "null"},
+                            ]
+                        },
+                        "bike_qr_code": {
+                            "anyOf": [
+                                {"type": "string", "maxLength": MAX_SUMMARY_CHARS},
+                                {"type": "null"},
+                            ]
+                        },
+                        "bike_qr_mismatch": {
+                            "anyOf": [
+                                {"type": "string", "maxLength": MAX_REASON_CHARS},
+                                {"type": "null"},
+                            ]
+                        },
                     },
                     "required": [
                         "llm_summary_250",
@@ -1275,6 +1333,9 @@ def build_request_payload(
                         "customer_abuse_detected",
                         "customer_abuse_count",
                         "improvement_tip",
+                        "rental_id",
+                        "bike_qr_code",
+                        "bike_qr_mismatch",
                     ],
                     "additionalProperties": False,
                 },
@@ -1317,11 +1378,20 @@ def call_llm(
     if openai_client is None:
         return None, None, None, None
 
-    if debug_input:
-        print("=== LLM SYSTEM PROMPT ===", flush=True)
-        print(system_prompt, flush=True)
-        print("=== LLM USER PROMPT ===", flush=True)
-        print(user_prompt, flush=True)
+    def _write_debug_entry(kind: str, payload: Dict[str, Any]) -> None:
+        try:
+            log_dir = Path("local_data")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "debug_log.jsonl"
+            payload_with_meta = {
+                "ts": datetime.utcnow().isoformat(),
+                "kind": kind,
+                **payload,
+            }
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload_with_meta, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception:
+            pass
 
     client_type, client = openai_client
     use_responses_api = model_uses_responses_api(model)
@@ -1339,6 +1409,7 @@ def call_llm(
     raw_content: Optional[str] = None
 
     response_status: Optional[str] = None
+    request_dump: Dict[str, Any] = {}
     try:
         if client_type == "client":
             if use_responses_api:
@@ -1350,6 +1421,10 @@ def call_llm(
                     user_prompt=user_prompt,
                 )
                 request_kwargs.pop("messages", None)
+                request_dump = {
+                    "mode": "responses",
+                    **request_kwargs,
+                }
                 response = client.responses.create(**request_kwargs)  # type: ignore[attr-defined]
                 response_status = getattr(response, "status", None)
                 usage = getattr(response, "usage", None)
@@ -1377,6 +1452,7 @@ def call_llm(
                     prompt_tokens = getattr(usage, "prompt_tokens", None)
                     completion_tokens = getattr(usage, "completion_tokens", None)
                 raw_content = response.choices[0].message.content  # type: ignore[index]
+                request_dump = {"mode": "chat_completions", **request_kwargs}
         else:
             if use_responses_api:
                 request_kwargs = build_request_payload(
@@ -1387,6 +1463,10 @@ def call_llm(
                     user_prompt=user_prompt,
                 )
                 request_kwargs.pop("messages", None)
+                request_dump = {
+                    "mode": "responses",
+                    **request_kwargs,
+                }
                 response = client.Responses.create(**request_kwargs)  # type: ignore[attr-defined]
                 if isinstance(response, dict):
                     response_status = response.get("status")
@@ -1416,6 +1496,23 @@ def call_llm(
                     prompt_tokens = usage.get("prompt_tokens")
                     completion_tokens = usage.get("completion_tokens")
                 raw_content = response["choices"][0]["message"]["content"]
+                request_dump = {"mode": "chat_completions", **request_kwargs}
+
+        if debug_input:
+            if not request_dump:
+                request_dump = {
+                    "mode": "fallback",
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": temperature,
+                    "max_completion_tokens": max_completion_tokens,
+                }
+            request_json = json.dumps(request_dump, ensure_ascii=False, separators=(",", ":"))
+            print(request_json, flush=True)
+            _write_debug_entry("request", request_dump)
     except Exception as exc:  # pragma: no cover - network errors
         error_message = str(exc)
         print(f"[warn] LLM call failed: {exc}", file=sys.stderr)
@@ -1446,9 +1543,19 @@ def call_llm(
         return None, prompt_tokens, completion_tokens, error_message
 
     if debug_output:
-        print("=== LLM RESPONSE ===", flush=True)
-        print(raw_content, flush=True)
-        print("====================", flush=True)
+        response_dump: Dict[str, Any] = {
+            "status": response_status or "completed",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+        try:
+            parsed = json.loads(raw_content)
+            response_dump["content"] = parsed
+        except Exception:
+            response_dump["content"] = raw_content
+        response_json = json.dumps(response_dump, ensure_ascii=False, separators=(",", ":"))
+        print(response_json, flush=True)
+        _write_debug_entry("response", response_dump)
 
     if prompt_tokens is None:
         prompt_tokens = estimate_tokens(system_prompt, model) + estimate_tokens(user_prompt, model)
@@ -1499,6 +1606,8 @@ def process_conversation(
         custom_fields = {}
     hub_value = custom_fields.get("hub")
     hub_str = "" if hub_value is None else str(hub_value)
+    rental_id = str(record.get("Rental ID") or record.get("rental_id") or "").strip()
+    bike_qr_code = str(record.get("Bike QR Code") or record.get("bike_qr_code") or "").strip()
     original_contact_reason = custom_fields.get("contact_reason")
     contact_reason_original = "" if original_contact_reason is None else str(original_contact_reason)
 
@@ -1506,6 +1615,9 @@ def process_conversation(
         "issue_key": str(record.get("issue_key", "")),
         "status": str(record.get("status", "")),
         "resolution": str(record.get("resolution", "")),
+        "rental_id": rental_id or "",
+        "bike_qr_code": bike_qr_code or "",
+        "bike_qr_mismatch": "",
         "custom_field_hub": hub_str,
         "conversation_start": format_timestamp(metrics.conversation_start),
         "conversation_end": format_timestamp(metrics.conversation_end),
@@ -1610,6 +1722,18 @@ def process_conversation(
     sentiment_scores = normalized_llm.get("customer_sentiment_scores", {})
     row["customer_sentiment_scores"] = json.dumps(sentiment_scores)
 
+    # Bike QR outputs
+    mismatch_note = normalized_llm.get("bike_qr_mismatch")
+    if mismatch_note is None:
+        row["bike_qr_mismatch"] = ""
+    else:
+        row["bike_qr_mismatch"] = str(mismatch_note).strip()
+    rental_id_llm = normalized_llm.get("rental_id")
+    if rental_id_llm is None:
+        row["rental_id"] = row["rental_id"] or ""
+    else:
+        row["rental_id"] = str(rental_id_llm).strip()
+
     agent_prof_flag = normalized_llm.get("agent_profanity_detected")
     if isinstance(agent_prof_flag, bool):
         row["agent_profanity_detected"] = "true" if agent_prof_flag else "false"
@@ -1653,6 +1777,7 @@ def run_convo_quality(
     verbose: bool,
     resume: bool,
     payload_dir: Optional[Path],
+    prompt_sections: Dict[str, str],
 ) -> Tuple[int, int, float]:
     adjusted_temperature: Optional[float] = temperature
     if use_llm and not model_supports_temperature(model):
@@ -1842,7 +1967,13 @@ def run_convo_quality(
         comments = parse_comments(raw_comments)
         metrics = compute_metrics(comments)
         transcript = build_transcript(comments)
-        system_prompt, user_prompt = build_llm_prompts(record, metrics, transcript, taxonomy)
+        system_prompt, user_prompt = build_llm_prompts(
+            record,
+            metrics,
+            transcript,
+            taxonomy,
+            prompt_sections,
+        )
 
         if payload_dir:
             safe_issue = re.sub(r"[^A-Za-z0-9_-]", "_", issue_key or "job")
@@ -1917,6 +2048,12 @@ def main() -> int:
     taxonomy = load_taxonomy(args.taxonomy_file)
     payload_dir = Path(args.generate_payloads).resolve() if args.generate_payloads else None
 
+    try:
+        prompt_sections = load_prompt_sections_or_raise()
+    except Exception as exc:
+        print(f"[error] failed to load prompt sections from Supabase: {exc}", file=sys.stderr)
+        return 1
+
     debug_prompts_choice = args.debug_prompts or "none"
     if args.debug and debug_prompts_choice == "none":
         debug_prompts_choice = "both"
@@ -1961,11 +2098,12 @@ def main() -> int:
             verbose=args.verbose,
             resume=args.resume,
             payload_dir=payload_dir,
+            prompt_sections=prompt_sections,
         )
 
         print(
             f"[summary] model {model}: processed={processed}, total_tokens={total_tokens}, "
-            f"cost=${total_cost:.6f} → {output_path}"
+            f"cost=${total_cost:.6f} -> {output_path}"
         )
         if payload_dir is not None:
             print(f"[info] Request payloads written to {payload_dir}")
