@@ -94,5 +94,6 @@ class handler(BaseHTTPRequestHandler):
                 },
             )
         except Exception:
-            traceback.print_exc()
-            self._respond_json(500, {"ok": False, "error": "error in process_job.run(); see logs"})
+            err_text = traceback.format_exc()
+            print(err_text)
+            self._respond_json(500, {"ok": False, "error": "error in process_job.run()", "trace": err_text})
