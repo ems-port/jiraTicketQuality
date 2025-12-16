@@ -316,6 +316,18 @@ type PromptEditorProps = {
 };
 
 const PROMPT_LABELS: Record<PromptConfigType, { title: string; description: string }> = {
+  system_prompt: {
+    title: "System prompt",
+    description: "High-level identity and output contract for the model."
+  },
+  prompt_header: {
+    title: "Prompt header",
+    description: "Intro text shown before the schema and tasks."
+  },
+  prompt_json_schema: {
+    title: "Prompt JSON schema",
+    description: "Structured schema for the model response."
+  },
   task_sequence: {
     title: "Task sequence",
     description: "Ordered steps the model must follow for each conversation."

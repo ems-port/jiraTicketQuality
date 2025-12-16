@@ -2,7 +2,7 @@
   "name": "jira-ticket-quality-ui",
   "private": true,
   "engines": {
-    "node": ">=20.0.0"
+    "node": "24.x"
   },
   "scripts": {
     "dev": "next dev",

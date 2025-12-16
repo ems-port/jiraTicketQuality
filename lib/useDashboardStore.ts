@@ -9,6 +9,9 @@ const DEFAULT_SETTINGS: SettingsState = {
   min_msgs_for_toxicity: 3
 };
 
+const IS_VERCEL =
+  typeof process !== "undefined" && (process.env.VERCEL === "1" || process.env.NEXT_PUBLIC_VERCEL === "1");
+
 type IdMapping = Record<string, string>;
 type RoleMapping = Record<string, AgentRole>;
 
@@ -77,9 +80,16 @@ export const useDashboardStore = create<DashboardState>()(
       name: "conversation-quality-dashboard",
       partialize: (state) => ({
         deAnonymize: state.deAnonymize,
-        settings: state.settings,
-        debugLLM: state.debugLLM
-      })
+        settings: state.settings
+      }),
+      onRehydrateStorage: () => (state) => {
+        if (!state) {
+          return;
+        }
+        if (IS_VERCEL) {
+          state.debugLLM = false;
+        }
+      }
     }
   )
 );
