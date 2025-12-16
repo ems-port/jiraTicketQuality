@@ -106,7 +106,15 @@ export default function PromptBuilderPage() {
   );
   const [promptConfigMeta, setPromptConfigMeta] = useState<
     Record<PromptConfigType, { version: number; updated_at?: string | null; updated_by?: string | null }>
-  >({});
+  >(() =>
+    PROJECT_PROMPT_TYPES.reduce(
+      (acc, type) => ({
+        ...acc,
+        [type]: { version: 1, updated_at: null, updated_by: null }
+      }),
+      {} as Record<PromptConfigType, { version: number; updated_at?: string | null; updated_by?: string | null }>
+    )
+  );
   const [promptConfigError, setPromptConfigError] = useState<string | null>(null);
   const [promptConfigLoading, setPromptConfigLoading] = useState(false);
   const [savingPromptType, setSavingPromptType] = useState<PromptConfigType | null>(null);
@@ -331,12 +339,13 @@ export default function PromptBuilderPage() {
           payload: entry?.payload ?? {},
           contextText: buildContextFromPrepared(entry?.payload ?? {})
         }))
-        .filter((item: any) => item.issue_key);
+        .filter((item: { issue_key: string }) => Boolean(item.issue_key));
       setPreparedOptions(mapped);
       if (!mapped.length) {
         return;
       }
-      const hasSelection = selectedPrepared && mapped.some((item) => item.issue_key === selectedPrepared);
+      const hasSelection =
+        selectedPrepared && mapped.some((item: { issue_key: string }) => item.issue_key === selectedPrepared);
       if (!preparedInitialized && mapped.length) {
         setSelectedPrepared(mapped[0].issue_key);
         setConversationContext(mapped[0].contextText);
