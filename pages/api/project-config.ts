@@ -112,11 +112,24 @@ async function getExistingRow(
 ): Promise<ProjectConfigRow | null> {
   const { data } = await client
     .from("project_config")
-    .select("id,version,checksum,updated_at,updated_by,payload,is_active")
+    .select("id,type,version,checksum,updated_at,updated_by,payload,is_active")
     .eq("type", configType)
     .limit(1)
     .maybeSingle();
-  return data ?? null;
+  if (!data) {
+    return null;
+  }
+  const row: ProjectConfigRow = {
+    id: (data as any).id,
+    type: ((data as any).type || configType) as ProjectConfigType,
+    payload: (data as any).payload,
+    version: (data as any).version ?? 1,
+    checksum: (data as any).checksum ?? null,
+    updated_at: (data as any).updated_at ?? null,
+    updated_by: (data as any).updated_by ?? null,
+    is_active: (data as any).is_active ?? null
+  };
+  return row;
 }
 
 async function insertHistory(client: SupabaseClient, existing: ProjectConfigRow, updatedBy: string, configType: ProjectConfigType) {

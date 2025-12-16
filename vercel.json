@@ -1,4 +1,7 @@
 {
+  "functions": {
+    "runtime": "nodejs24.x"
+  },
   "crons": [
     {
       "path": "/api/ingest",
