@@ -3,8 +3,63 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const MAX_FETCH_LIMIT = Math.max(1, Number(process.env.CONVERSATION_FETCH_LIMIT ?? 5000));
-const PAGE_SIZE = Math.max(1, Number(process.env.CONVERSATION_FETCH_PAGE_SIZE ?? 500));
+const MAX_FETCH_LIMIT = Math.max(1, Number(process.env.CONVERSATION_FETCH_LIMIT ?? 500));
+const PAGE_SIZE = Math.max(1, Number(process.env.CONVERSATION_FETCH_PAGE_SIZE ?? 200));
+const SELECT_COLUMNS =
+  process.env.CONVERSATION_SELECT_COLUMNS ||
+  [
+    "issue_key",
+    "agent_authors",
+    "customer_authors",
+    "conversation_start",
+    "started_at",
+    "conversation_end",
+    "ended_at",
+    "duration_minutes",
+    "duration_to_resolution",
+    "first_agent_response_minutes",
+    "avg_agent_response_minutes",
+    "messages_total",
+    "messages_agent",
+    "messages_customer",
+    "customer_abuse_count",
+    "customer_abuse_detected",
+    "agent_profanity_detected",
+    "agent_profanity_count",
+    "agent_score",
+    "customer_score",
+    "conversation_rating",
+    "llm_summary_250",
+    "ticket_summary",
+    "contact_reason",
+    "contact_reason_original",
+    "contact_reason_change",
+    "contact_reason_change_justification",
+    "llm_conatct_reason",
+    "reason_override_why",
+    "resolution_why",
+    "problem_extract",
+    "extract_customer_problem",
+    "resolution_extract",
+    "steps_extract",
+    "resolution_timestamp_iso",
+    "resolution_message_index",
+    "customer_sentiment_primary",
+    "customer_sentiment_scores",
+    "custom_field_hub",
+    "llm_model",
+    "model",
+    "agent_toxicity_score",
+    "agent_abusive_flag",
+    "customer_toxicity_score",
+    "customer_abusive_flag",
+    "status",
+    "llm_cost_usd",
+    "rental_id",
+    "improvement_tip",
+    "bike_qr_mismatch",
+    "bike_qr_code"
+  ].join(",");
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "GET") {
@@ -56,7 +111,7 @@ async function fetchProcessedConversations(client: SupabaseClient, limit: number
     const end = Math.min(start + pageSize - 1, start + (limit - rows.length) - 1);
     const { data, error } = await client
       .from("jira_processed_conversations")
-      .select("*")
+      .select(SELECT_COLUMNS)
       .order("conversation_end", { ascending: false })
       .range(start, end);
 
@@ -64,7 +119,7 @@ async function fetchProcessedConversations(client: SupabaseClient, limit: number
       throw error;
     }
 
-    const batch = data ?? [];
+    const batch = (Array.isArray(data) ? data : []) as unknown as Record<string, unknown>[];
     rows.push(...batch);
 
     if (batch.length < (end - start + 1)) {

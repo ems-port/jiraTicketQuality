@@ -5,22 +5,6 @@ const { execSync } = require("node:child_process");
 
 const BUILD_INFO_PATH = path.join(__dirname, "..", "build-info.json");
 
-function readExistingBuildNumber() {
-  try {
-    const raw = fs.readFileSync(BUILD_INFO_PATH, "utf-8");
-    const data = JSON.parse(raw);
-    if (data && typeof data.buildNumber === "number" && Number.isFinite(data.buildNumber)) {
-      return data.buildNumber;
-    }
-    if (data && typeof data.buildNumber === "string" && /^\d+$/.test(data.buildNumber)) {
-      return Number(data.buildNumber);
-    }
-  } catch {
-    // ignore
-  }
-  return 0;
-}
-
 function computeGitCount() {
   try {
     const output = execSync("git rev-list --count HEAD").toString().trim();
@@ -31,9 +15,38 @@ function computeGitCount() {
   }
 }
 
+function ensureFullHistory() {
+  try {
+    const isShallow = execSync("git rev-parse --is-shallow-repository").toString().trim() === "true";
+    if (!isShallow) {
+      return;
+    }
+    const branch =
+      process.env.VERCEL_GIT_COMMIT_REF ||
+      execSync("git rev-parse --abbrev-ref HEAD").toString().trim() ||
+      "main";
+    try {
+      execSync(`git fetch origin ${branch} --depth=2147483647`, { stdio: "ignore" });
+    } catch {
+      // ignore branch-specific fetch failures
+    }
+    try {
+      execSync("git fetch --unshallow", { stdio: "ignore" });
+    } catch {
+      // ignore if repository is already fully cloned or fetch not allowed
+    }
+  } catch {
+    // ignore inability to detect shallow repo
+  }
+}
+
 function main() {
+  ensureFullHistory();
   const gitCount = computeGitCount();
-  const buildNumber = gitCount ?? readExistingBuildNumber() + 1;
+  if (gitCount === null) {
+    throw new Error("Unable to compute git commit count for build number");
+  }
+  const buildNumber = gitCount;
   const payload = {
     buildNumber,
     updatedAt: new Date().toISOString()

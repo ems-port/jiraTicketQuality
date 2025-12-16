@@ -157,7 +157,11 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
     customerToxicityScore: asNumber(raw.customer_toxicity_score),
     customerAbusiveFlag: asBoolean(raw.customer_abusive_flag),
     escalated,
-    raw: { ...raw }
+    raw: {
+      extract_customer_problem: problemExtractRaw,
+      contact_reason: contactReason,
+      contact_reason_original: contactReasonOriginal
+    }
   };
 }
 

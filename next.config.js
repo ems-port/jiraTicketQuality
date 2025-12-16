@@ -76,19 +76,19 @@ function resolveBuildNumber() {
   if (process.env.NEXT_PUBLIC_BUILD_NUMBER) {
     return process.env.NEXT_PUBLIC_BUILD_NUMBER;
   }
-  const stored = readBuildNumberFromFile();
-  if (stored) {
-    return stored;
-  }
   const gitCount = computeGitBuildNumber();
   if (gitCount) {
     return gitCount;
   }
-  if (process.env.VERCEL_BUILD_ID) {
-    return process.env.VERCEL_BUILD_ID;
+  const stored = readBuildNumberFromFile();
+  if (stored) {
+    return stored;
   }
   if (process.env.VERCEL_GIT_COMMIT_SHA) {
     return process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7);
+  }
+  if (process.env.VERCEL_BUILD_ID) {
+    return process.env.VERCEL_BUILD_ID;
   }
   return "dev";
 }
