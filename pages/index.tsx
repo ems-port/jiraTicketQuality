@@ -220,6 +220,7 @@ export default function DashboardPage({
   const [improvementGroupingLoading, setImprovementGroupingLoading] = useState(false);
   const [improvementGroupingError, setImprovementGroupingError] = useState<string | null>(null);
   const [improvementDrilldownOpen, setImprovementDrilldownOpen] = useState(false);
+  const [selectedImprovementGroupId, setSelectedImprovementGroupId] = useState<string | null>(null);
   const [improvementRefreshRunning, setImprovementRefreshRunning] = useState(false);
   const [improvementRefreshStatus, setImprovementRefreshStatus] = useState<string | null>(null);
   const [isManagerReviewOpen, setIsManagerReviewOpen] = useState(false);
@@ -1431,6 +1432,10 @@ export default function DashboardPage({
               onRefresh={refreshImprovementGrouping}
               refreshing={improvementRefreshRunning}
               refreshStatus={improvementRefreshStatus}
+              onSelectGroup={(groupId) => {
+                setSelectedImprovementGroupId(groupId);
+                setImprovementDrilldownOpen(true);
+              }}
             />
 
             <section className="grid gap-4 lg:grid-cols-3">
@@ -1544,6 +1549,7 @@ export default function DashboardPage({
         agentMapping={agentNameMap}
         deAnonymize={deAnonymize}
         roleMapping={roleMapping}
+        selectedGroupId={selectedImprovementGroupId}
       />
 
       <ManagerReviewPanel

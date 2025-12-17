@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useRef, useEffect } from "react";
 
 import { DisplayName } from "@/components/DisplayName";
 import { formatDateTimeLocal } from "@/lib/date";
@@ -16,6 +16,7 @@ type ImprovementGroupsDrilldownProps = {
   agentMapping: Record<string, string>;
   deAnonymize: boolean;
   roleMapping: Record<string, AgentRole>;
+  selectedGroupId?: string | null;
 };
 
 export function ImprovementGroupsDrilldown({
@@ -26,7 +27,8 @@ export function ImprovementGroupsDrilldown({
   mapping,
   agentMapping,
   deAnonymize,
-  roleMapping
+  roleMapping,
+  selectedGroupId
 }: ImprovementGroupsDrilldownProps) {
   const groups = Array.isArray(grouping?.groups) ? grouping?.groups : [];
 
@@ -47,6 +49,19 @@ export function ImprovementGroupsDrilldown({
     });
     return result;
   }, [groups, issueAgents]);
+
+  const selectedRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (open && selectedRef.current) {
+      const node = selectedRef.current;
+      // Defer to allow layout to settle
+      const timer = setTimeout(() => {
+        node.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [open, selectedGroupId, groups.length]);
 
   if (!open) {
     return null;
@@ -84,8 +99,13 @@ export function ImprovementGroupsDrilldown({
               severityScore: 0,
               overallScore: 0
             };
+            const isSelected = selectedGroupId && group.groupId === selectedGroupId;
             return (
-            <article key={group.groupId} className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
+            <article
+              key={group.groupId}
+              ref={isSelected ? selectedRef : null}
+              className={`rounded-2xl border p-4 ${isSelected ? "border-brand-500 bg-slate-900/80" : "border-slate-800 bg-slate-900/70"}`}
+            >
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-base font-semibold text-white">{group.title}</h3>
