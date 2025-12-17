@@ -153,3 +153,18 @@ create unique index if not exists idx_contact_taxonomy_reason_unique on public.c
 
 -- Cleanup legacy column if present
 alter table if exists public.contact_taxonomy_versions drop column if exists labels;
+
+-- Aggregated improvement tip groupings (LLM-generated themes)
+create table if not exists public.improvement_tip_groupings (
+    id uuid primary key default gen_random_uuid(),
+    time_window_start timestamptz not null,
+    time_window_end timestamptz not null,
+    total_notes integer not null,
+    unique_notes integer not null,
+    model text,
+    payload jsonb not null,
+    created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists idx_improvement_tip_groupings_window
+    on public.improvement_tip_groupings (time_window_start, time_window_end);

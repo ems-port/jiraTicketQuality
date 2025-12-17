@@ -205,6 +205,46 @@ export interface ImprovementTipSummary {
   windowEnd: Date;
 }
 
+export interface ImprovementGroupNextStep {
+  trainingCue: string;
+  successSignals: string[];
+}
+
+export interface ImprovementGroupMetrics {
+  groupSize: number;
+  coveragePct: number;
+  actionabilityScore: number;
+  severityScore: number;
+  overallScore: number;
+}
+
+export interface ImprovementGroup {
+  groupId: string;
+  title: string;
+  description: string;
+  tip: string;
+  keyIds: string[];
+  metrics: ImprovementGroupMetrics;
+  nextSteps: ImprovementGroupNextStep[];
+}
+
+export interface ImprovementGroupingPayload {
+  time_window: { start_utc: string; end_utc: string };
+  totals: { notes: number; unique_notes: number };
+  groups: ImprovementGroup[];
+  ungrouped_key_ids: string[];
+}
+
+export interface ImprovementGroupingRecord {
+  timeWindowStart: string;
+  timeWindowEnd: string;
+  totalNotes: number;
+  uniqueNotes: number;
+  model?: string | null;
+  payload: ImprovementGroupingPayload;
+  createdAt: string;
+}
+
 export interface ContactReasonSparkPoint {
   label: string;
   count: number;

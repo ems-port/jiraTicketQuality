@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Papa from "papaparse";
 import type { GetStaticProps } from "next";
 import clsx from "clsx";
 import Link from "next/link";
+import { useRouter } from "next/router";
+import Papa from "papaparse";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentMatrixHeatmap } from "@/components/AgentMatrixHeatmap";
 import { AgentRankList } from "@/components/AgentRankList";
@@ -13,8 +14,8 @@ import { EscalationCard } from "@/components/EscalationCard";
 import { DrilldownTable } from "@/components/DrilldownTable";
 import { KPICard } from "@/components/KPICard";
 import { ManagerReviewPanel } from "@/components/ManagerReviewPanel";
-import { TipsOfTheDayPanel } from "@/components/TipsOfTheDayPanel";
-import { TipsDrilldownModal } from "@/components/TipsDrilldownModal";
+import { ImprovementGroupsPanel } from "@/components/ImprovementGroupsPanel";
+import { ImprovementGroupsDrilldown } from "@/components/ImprovementGroupsDrilldown";
 import { TicketVolumePanel } from "@/components/TicketVolumePanel";
 import { ToxicityList } from "@/components/ToxicityList";
 import { resolveDisplayName } from "@/lib/displayNames";
@@ -27,7 +28,6 @@ import {
   computeContactReasonSummary,
   buildEscalationSeries,
   computeFlaggedAgents,
-  computeImprovementTips,
   computeResolvedStats,
   computeTopAgents,
   computeToxicCustomers,
@@ -49,6 +49,52 @@ import type {
   MetricSeries,
   TimeWindow
 } from "@/types";
+import type { ImprovementGroupingPayload, ImprovementGroupingRecord } from "@/types";
+
+function normalizeGroupingPayload(raw: any): ImprovementGroupingPayload | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const groupsRaw = Array.isArray(raw.groups) ? raw.groups : [];
+  const groups = groupsRaw.map((group: any) => {
+    const metricsRaw = group.metrics || {};
+    return {
+      groupId: group.group_id ?? group.groupId ?? "",
+      title: group.title ?? "",
+      description: group.description ?? "",
+      tip: group.tip ?? "",
+      keyIds: Array.isArray(group.key_ids) ? group.key_ids : Array.isArray(group.keyIds) ? group.keyIds : [],
+      metrics: {
+        groupSize: metricsRaw.group_size ?? metricsRaw.groupSize ?? 0,
+        coveragePct: metricsRaw.coverage_pct ?? metricsRaw.coveragePct ?? 0,
+        actionabilityScore: metricsRaw.actionability_score ?? metricsRaw.actionabilityScore ?? 0,
+        severityScore: metricsRaw.severity_score ?? metricsRaw.severityScore ?? 0,
+        overallScore: metricsRaw.overall_score ?? metricsRaw.overallScore ?? 0
+      },
+      nextSteps: (Array.isArray(group.next_steps) ? group.next_steps : Array.isArray(group.nextSteps) ? group.nextSteps : []).map(
+        (step: any) => ({
+          trainingCue: step.training_cue ?? step.trainingCue ?? "",
+          successSignals: Array.isArray(step.success_signals)
+            ? step.success_signals
+            : Array.isArray(step.successSignals)
+              ? step.successSignals
+              : []
+        })
+      )
+    };
+  });
+
+  return {
+    time_window: raw.time_window ?? raw.timeWindow ?? { start_utc: null, end_utc: null },
+    totals: raw.totals ?? { notes: 0, unique_notes: 0 },
+    groups,
+    ungrouped_key_ids: Array.isArray(raw.ungrouped_key_ids)
+      ? raw.ungrouped_key_ids
+      : Array.isArray(raw.ungroupedKeyIds)
+        ? raw.ungroupedKeyIds
+        : []
+  };
+}
 
 type AgentDirectoryState = Record<string, { displayName: string; role: AgentRole }>;
 
@@ -110,6 +156,7 @@ export default function DashboardPage({
   initialAgentDirectory = {},
   initialAgentOrder = []
 }: DashboardPageProps) {
+  const router = useRouter();
   const buildNumber = process.env.NEXT_PUBLIC_BUILD_NUMBER ?? "dev";
   const rows = useDashboardStore((state) => state.rows);
   const setRows = useDashboardStore((state) => state.setRows);
@@ -167,7 +214,12 @@ export default function DashboardPage({
   const [agentSaveState, setAgentSaveState] = useState<Record<string, AgentSaveState>>({});
   const [agentDirectoryError, setAgentDirectoryError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
-  const [tipsDrilldownOpen, setTipsDrilldownOpen] = useState(false);
+  const [improvementGroupingRecord, setImprovementGroupingRecord] = useState<ImprovementGroupingRecord | null>(null);
+  const [improvementGroupingLoading, setImprovementGroupingLoading] = useState(false);
+  const [improvementGroupingError, setImprovementGroupingError] = useState<string | null>(null);
+  const [improvementDrilldownOpen, setImprovementDrilldownOpen] = useState(false);
+  const [improvementRefreshRunning, setImprovementRefreshRunning] = useState(false);
+  const [improvementRefreshStatus, setImprovementRefreshStatus] = useState<string | null>(null);
   const [isManagerReviewOpen, setIsManagerReviewOpen] = useState(false);
   const [useOnlineData, setUseOnlineData] = useState(true);
   const [refreshState, setRefreshState] = useState<RefreshJobState>(DEFAULT_REFRESH_STATE);
@@ -330,6 +382,65 @@ export default function DashboardPage({
     }
   }, [setRows, setFileError, setFileName]);
 
+  const loadImprovementGrouping = useCallback(async () => {
+    setImprovementGroupingLoading(true);
+    setImprovementGroupingError(null);
+    try {
+      const response = await fetch("/api/improvement-groups");
+      if (!response.ok) {
+        throw new Error(`Failed to load improvement groups (${response.status})`);
+      }
+      const payload = await response.json();
+      if (payload?.record) {
+        const normalizedPayload = normalizeGroupingPayload(payload.record.payload);
+        setImprovementGroupingRecord({
+          timeWindowStart: payload.record.timeWindowStart,
+          timeWindowEnd: payload.record.timeWindowEnd,
+          totalNotes: payload.record.totalNotes,
+          uniqueNotes: payload.record.uniqueNotes,
+          model: payload.record.model,
+          payload:
+            normalizedPayload ??
+            {
+              time_window: { start_utc: "", end_utc: "" },
+              totals: { notes: 0, unique_notes: 0 },
+              groups: [],
+              ungrouped_key_ids: []
+            },
+          createdAt: payload.record.createdAt
+        });
+      } else {
+        setImprovementGroupingRecord(null);
+      }
+    } catch (error) {
+      setImprovementGroupingError((error as Error).message ?? "Unable to load improvement groups.");
+    } finally {
+      setImprovementGroupingLoading(false);
+    }
+  }, []);
+
+  const refreshImprovementGrouping = useCallback(async () => {
+    setImprovementRefreshRunning(true);
+    setImprovementRefreshStatus(null);
+    setImprovementGroupingError(null);
+    try {
+      const response = await fetch("/api/improvement-groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      if (!response.ok) {
+        setImprovementRefreshStatus(`Refresh failed (${response.status})`);
+        throw new Error(`Failed to refresh improvement groups (${response.status})`);
+      }
+      setImprovementRefreshStatus("Refresh succeeded.");
+    } catch (error) {
+      setImprovementGroupingError((error as Error).message ?? "Unable to refresh improvement groups.");
+    } finally {
+      setImprovementRefreshRunning(false);
+      void loadImprovementGrouping();
+    }
+  }, [loadImprovementGrouping]);
+
   useEffect(() => {
     if (!rows.length && !initialLoadAttemptedRef.current && !useOnlineData) {
       initialLoadAttemptedRef.current = true;
@@ -342,6 +453,10 @@ export default function DashboardPage({
       void loadOnlineData();
     }
   }, [useOnlineData, loadOnlineData]);
+
+  useEffect(() => {
+    void loadImprovementGrouping();
+  }, [loadImprovementGrouping, useOnlineData]);
 
   const fetchRefreshStatus = useCallback(async () => {
     try {
@@ -526,6 +641,20 @@ export default function DashboardPage({
   }, [agentDirectory, agentOrder, setRoleMapping]);
 
   const sourceRows = rows;
+  const issueAgents = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    sourceRows.forEach((row) => {
+      if (!map[row.issueKey]) {
+        map[row.issueKey] = [];
+      }
+      row.agentList.forEach((agent) => {
+        if (!map[row.issueKey].includes(agent)) {
+          map[row.issueKey].push(agent);
+        }
+      });
+    });
+    return map;
+  }, [sourceRows]);
 
   const attributeFilteredRows = useMemo(() => {
     const search = searchTerm.trim().toLowerCase();
@@ -680,11 +809,6 @@ export default function DashboardPage({
     const sum = values.reduce((acc, value) => acc + value, 0);
     return sum / values.length;
   }, [attributeFilteredRows, selectedWindow, referenceNow]);
-
-  const improvementTipSummary = useMemo(
-    () => computeImprovementTips(attributeFilteredRows, referenceNow),
-    [attributeFilteredRows, referenceNow]
-  );
 
   const contactReasonSummary = useMemo(
     () => computeContactReasonSummary(attributeFilteredRows, selectedWindow, referenceNow),
@@ -950,15 +1074,19 @@ export default function DashboardPage({
 
   const handleContactReasonSelect = useCallback(
     (reason: string) => {
-      const normalized = reason.trim().toLowerCase();
-      const reasonRows = filteredRows.filter((row) => {
-        const value = (row.contactReason ?? row.contactReasonOriginal ?? "Unspecified").trim();
-        const label = value.length ? value : "Unspecified";
-        return label.toLowerCase() === normalized;
+      const query: Record<string, string> = {
+        reason,
+        window: selectedWindow
+      };
+      if (hubFilter !== "All") {
+        query.hub = hubFilter;
+      }
+      void router.push({
+        pathname: "/contact-reasons",
+        query
       });
-      openDrilldown(`Contact reason: ${reason}`, reasonRows);
     },
-    [filteredRows]
+    [router, selectedWindow, hubFilter]
   );
 
   const handleMisclassifiedDrilldown = useCallback(
@@ -1069,7 +1197,7 @@ export default function DashboardPage({
                       }
                     />
                     {refreshState.stage === "error" && refreshState.error
-                      ? `Fetch failed · ${refreshState.error}`
+                    ? `Fetch failed - ${refreshState.error}`
                       : refreshState.stage === "ingesting"
                       ? "Fetching latest Jira tickets…"
                       : refreshState.fetchedTickets != null
@@ -1267,9 +1395,14 @@ export default function DashboardPage({
               />
             </section>
 
-            <TipsOfTheDayPanel
-              summary={improvementTipSummary}
-              onOpen={() => setTipsDrilldownOpen(true)}
+            <ImprovementGroupsPanel
+              record={improvementGroupingRecord}
+              loading={improvementGroupingLoading}
+              error={improvementGroupingError}
+              onOpen={() => setImprovementDrilldownOpen(true)}
+              onRefresh={refreshImprovementGrouping}
+              refreshing={improvementRefreshRunning}
+              refreshStatus={improvementRefreshStatus}
             />
 
             <section className="grid gap-4 lg:grid-cols-3">
@@ -1374,12 +1507,11 @@ export default function DashboardPage({
         initialAgentFilter={drilldownState?.initialAgentId ?? null}
       />
 
-      <TipsDrilldownModal
-        open={tipsDrilldownOpen}
-        tips={improvementTipSummary.entries}
-        windowStart={improvementTipSummary.windowStart}
-        windowEnd={improvementTipSummary.windowEnd}
-        onClose={() => setTipsDrilldownOpen(false)}
+      <ImprovementGroupsDrilldown
+        open={improvementDrilldownOpen}
+        grouping={improvementGroupingRecord?.payload ?? null}
+        onClose={() => setImprovementDrilldownOpen(false)}
+        issueAgents={issueAgents}
         mapping={idMapping}
         agentMapping={agentNameMap}
         deAnonymize={deAnonymize}
