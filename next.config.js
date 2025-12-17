@@ -1,8 +1,6 @@
 /** @type {import('next').NextConfig} */
 const path = require("node:path");
-const fs = require("node:fs");
 const { execSync } = require("node:child_process");
-const BUILD_INFO_PATH = path.join(__dirname, "build-info.json");
 
 function isGitAvailable() {
   try {
@@ -14,9 +12,6 @@ function isGitAvailable() {
 }
 
 function ensureFullHistory() {
-  if (process.env.VERCEL !== "1") {
-    return;
-  }
   try {
     const isShallow = execSync("git rev-parse --is-shallow-repository").toString().trim() === "true";
     if (!isShallow) {
@@ -53,44 +48,15 @@ function computeGitBuildNumber() {
   }
 }
 
-function readBuildNumberFromFile() {
-  try {
-    if (!fs.existsSync(BUILD_INFO_PATH)) {
-      return null;
-    }
-    const raw = fs.readFileSync(BUILD_INFO_PATH, "utf-8");
-    const data = JSON.parse(raw);
-    if (data && typeof data.buildNumber === "number") {
-      return String(data.buildNumber);
-    }
-    if (data && typeof data.buildNumber === "string") {
-      return data.buildNumber;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function resolveBuildNumber() {
   if (process.env.NEXT_PUBLIC_BUILD_NUMBER) {
     return process.env.NEXT_PUBLIC_BUILD_NUMBER;
   }
   const gitCount = computeGitBuildNumber();
-  if (gitCount) {
+  if (gitCount && /^\d+$/.test(gitCount)) {
     return gitCount;
   }
-  const stored = readBuildNumberFromFile();
-  if (stored) {
-    return stored;
-  }
-  if (process.env.VERCEL_GIT_COMMIT_SHA) {
-    return process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7);
-  }
-  if (process.env.VERCEL_BUILD_ID) {
-    return process.env.VERCEL_BUILD_ID;
-  }
-  return "dev";
+  throw new Error("Unable to compute git commit count for build number");
 }
 
 const buildNumber = resolveBuildNumber();

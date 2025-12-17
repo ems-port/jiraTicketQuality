@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Summarize recurring improvement tips from a conversation quality CSV.
+Summarize recurring improvement tips pulled directly from Supabase.
 
 The script filters rows to a recent time window, aggregates the
 ``improvement_tip`` column, and asks an LLM to distill the three
 themes that surface most often. It expects an ``OPENAI_API_KEY`` in
-the environment.
+the environment and Supabase credentials (URL + service key).
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
+import json
 import os
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from dateutil import parser as dt_parser
 
@@ -79,29 +79,88 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
 @dataclass(frozen=True)
 class ImprovementTip:
     text: str
+    issue_key: str
     conversation_start: datetime
 
 
-def load_tips_and_latest(csv_path: Path) -> Tuple[List[ImprovementTip], Optional[datetime]]:
+def ensure_supabase_client(
+    supabase_url: Optional[str] = None, supabase_key: Optional[str] = None
+) -> Optional[Any]:
+    resolved_url = supabase_url or os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+    resolved_key = supabase_key or os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+    if not resolved_url or not resolved_key:
+        print(
+            "[error] Missing Supabase credentials; set SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL "
+            "and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY).",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        from supabase import create_client  # type: ignore
+    except ImportError:
+        print("[error] supabase-py is not installed. Run 'pip install supabase>=2.4.0'.", file=sys.stderr)
+        return None
+    return create_client(resolved_url, resolved_key)
+
+
+def fetch_supabase_tips(
+    client: Any,
+    table: str,
+    window_start: datetime,
+    window_end: datetime,
+    page_size: int = 1000,
+) -> List[ImprovementTip]:
     tips: List[ImprovementTip] = []
-    latest: Optional[datetime] = None
-    with csv_path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
+    start = 0
+    while True:
+        try:
+            response = (
+                client.table(table)
+                .select("issue_key, improvement_tip, conversation_start")
+                .gte("conversation_start", window_start.isoformat())
+                .lte("conversation_start", window_end.isoformat())
+                .order("conversation_start", desc=False)
+                .range(start, start + page_size - 1)
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[error] Supabase query failed: {exc}", file=sys.stderr)
+            break
+
+        rows = getattr(response, "data", None) or []
+        for row in rows:
+            tip_text = (row.get("improvement_tip") or "").strip()
+            issue_key = (row.get("issue_key") or "").strip()
             started = _parse_datetime(row.get("conversation_start"))
-            if started and (latest is None or started > latest):
-                latest = started
-            raw_tip = (row.get("improvement_tip") or "").strip()
-            if not raw_tip or started is None:
+            if not tip_text or not issue_key or started is None:
                 continue
-            tips.append(ImprovementTip(text=raw_tip, conversation_start=started))
-    return tips, latest
+            tips.append(ImprovementTip(text=tip_text, issue_key=issue_key, conversation_start=started))
+
+        if len(rows) < page_size:
+            break
+        start += page_size
+
+    return tips
 
 
-def format_feedback_counts(counts: Sequence[Tuple[str, int]], limit: int) -> str:
+def format_feedback_counts(
+    counts: Sequence[Tuple[str, int]],
+    limit: int,
+    issue_key_map: Optional[Dict[str, Set[str]]] = None,
+    issue_key_limit: int = 5,
+) -> str:
     lines: List[str] = []
     for text, occurrences in counts[:limit]:
-        lines.append(f"- {occurrences}× {text}")
+        suffix = ""
+        if issue_key_map is not None and text in issue_key_map:
+            keys = sorted(issue_key_map[text])
+            head = keys[:issue_key_limit]
+            remaining = len(keys) - len(head)
+            suffix = f" (issues: {', '.join(head)}"
+            if remaining > 0:
+                suffix += f", +{remaining}"
+            suffix += ")"
+        lines.append(f"- {occurrences}× {text}{suffix}")
     remaining = len(counts) - limit
     if remaining > 0:
         lines.append(f"- … ({remaining} additional unique tips omitted for brevity)")
@@ -206,13 +265,31 @@ def call_llm(
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Aggregate improvement tips for the past 24 hours and summarise recurring themes."
+        description="Aggregate improvement tips from Supabase and summarise recurring themes."
     )
     parser.add_argument(
-        "--csv-path",
-        type=Path,
-        default=Path("data/convo_quality_550.csv"),
-        help="Path to the CSV generated by convo_quality.py.",
+        "--table",
+        type=str,
+        default="jira_processed_conversations",
+        help="Supabase table containing processed Jira conversations.",
+    )
+    parser.add_argument(
+        "--supabase-url",
+        type=str,
+        default=None,
+        help="Supabase project URL (defaults to SUPABASE_URL/NEXT_PUBLIC_SUPABASE_URL).",
+    )
+    parser.add_argument(
+        "--supabase-key",
+        type=str,
+        default=None,
+        help="Supabase service role key (defaults to SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY).",
+    )
+    parser.add_argument(
+        "--page-size",
+        type=int,
+        default=1000,
+        help="Page size for Supabase range queries.",
     )
     parser.add_argument(
         "--hours",
@@ -229,7 +306,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4o-mini",
+        default="gpt-5-mini",
         help="OpenAI model identifier to use for summarisation.",
     )
     parser.add_argument(
@@ -251,9 +328,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Number of most common unique tips to include in the prompt.",
     )
     parser.add_argument(
+        "--issue-keys-per-tip",
+        type=int,
+        default=5,
+        help="Number of issue keys to show per tip when printing aggregated data.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print the prompts before calling the LLM.",
+        help="Print the full API payload and exit before calling the LLM.",
     )
     return parser.parse_args(argv)
 
@@ -263,14 +346,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.hours <= 0:
         print("[error] --hours must be positive.", file=sys.stderr)
         return 2
-    if not args.csv_path.exists():
-        print(f"[error] CSV not found at {args.csv_path}", file=sys.stderr)
-        return 1
-
-    all_tips, latest_start = load_tips_and_latest(args.csv_path)
-    if not all_tips:
-        print("No improvement tips were found in the file.", file=sys.stderr)
-        return 0
 
     if args.reference_time:
         window_end = _parse_datetime(args.reference_time)
@@ -278,26 +353,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"[error] Could not parse --reference-time={args.reference_time!r}", file=sys.stderr)
             return 2
     else:
-        if latest_start is None:
-            print("No valid conversation_start timestamps were found.", file=sys.stderr)
-            return 1
-        window_end = latest_start
+        window_end = datetime.now(timezone.utc)
 
     window_start = window_end - timedelta(hours=args.hours)
 
-    tips = [
-        tip
-        for tip in all_tips
-        if window_start <= tip.conversation_start <= window_end
-    ]
+    supabase_client = ensure_supabase_client(args.supabase_url, args.supabase_key)
+    if supabase_client is None:
+        return 1
+
+    tips = fetch_supabase_tips(
+        client=supabase_client,
+        table=args.table,
+        window_start=window_start,
+        window_end=window_end,
+        page_size=max(1, args.page_size),
+    )
     if not tips:
         print(
-            f"No improvement tips after {window_start.isoformat(timespec='seconds')} UTC were found.",
+            f"No improvement tips between {window_start.isoformat(timespec='seconds')} and "
+            f"{window_end.isoformat(timespec='seconds')} UTC were found.",
             file=sys.stderr,
         )
         return 0
 
-    counts = Counter(tip.text for tip in tips).most_common()
+    counts_counter = Counter()
+    issue_key_map: Dict[str, Set[str]] = defaultdict(set)
+    for tip in tips:
+        counts_counter[tip.text] += 1
+        issue_key_map[tip.text].add(tip.issue_key)
+
+    counts = counts_counter.most_common()
     system_prompt = (
         "You are an expert QA program manager producing concise coaching insights from repeated "
         "agent improvement tips. Focus on trends, not one-off notes."
@@ -310,17 +395,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         top_n=max(1, args.top_counts),
     )
 
-    openai_client = ensure_openai_client()
-    summary, prompt_tokens, completion_tokens = call_llm(
-        openai_client=openai_client,
-        model=args.model,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        max_tokens=args.max_tokens,
-        temperature=args.temperature,
-        debug=args.debug,
-    )
-
     print(
         f"Time window: {window_start.isoformat(timespec='seconds')} — "
         f"{window_end.isoformat(timespec='seconds')} UTC"
@@ -329,8 +403,40 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Unique tips observed: {len(counts)}")
     print("")
     print("Top recurring tips passed to the model:")
-    print(format_feedback_counts(counts, limit=min(args.top_counts, len(counts))))
+    print(
+        format_feedback_counts(
+            counts,
+            limit=min(args.top_counts, len(counts)),
+            issue_key_map=issue_key_map,
+            issue_key_limit=max(1, args.issue_keys_per_tip),
+        )
+    )
     print("")
+
+    if args.debug:
+        payload = {
+            "model": args.model,
+            "temperature": args.temperature,
+            "max_tokens": args.max_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        print("Debug mode: skipping LLM call. Request payload would be:")
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    openai_client = ensure_openai_client()
+    summary, prompt_tokens, completion_tokens = call_llm(
+        openai_client=openai_client,
+        model=args.model,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        debug=False,
+    )
 
     if summary:
         print("LLM summary:")

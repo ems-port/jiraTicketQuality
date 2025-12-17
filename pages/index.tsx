@@ -297,13 +297,27 @@ export default function DashboardPage({
   const loadOnlineData = useCallback(async () => {
     setFileError(null);
     try {
-      const response = await fetch("/api/conversations");
-      if (!response.ok) {
-        throw new Error(`Failed to load online data (${response.status})`);
+      const maxLimit = Math.max(1, Number(process.env.NEXT_PUBLIC_CONVERSATION_FETCH_LIMIT ?? 5000));
+      const pageSize = Math.max(1, Number(process.env.NEXT_PUBLIC_CONVERSATION_PAGE_SIZE ?? 200));
+      let offset = 0;
+      const collected: Record<string, unknown>[] = [];
+      while (collected.length < maxLimit) {
+        const remaining = maxLimit - collected.length;
+        const page = Math.min(pageSize, remaining);
+        const response = await fetch(`/api/conversations?offset=${offset}&limit=${maxLimit}&pageSize=${page}`);
+        if (!response.ok) {
+          throw new Error(`Failed to load online data (${response.status})`);
+        }
+        const payload = await response.json();
+        const batch: Record<string, unknown>[] = Array.isArray(payload.rows) ? payload.rows : [];
+        collected.push(...batch);
+        const nextOffset = typeof payload.nextOffset === "number" ? payload.nextOffset : null;
+        if (!nextOffset || !batch.length) {
+          break;
+        }
+        offset = nextOffset;
       }
-      const payload = await response.json();
-      const rawRows: Record<string, unknown>[] = payload.rows ?? [];
-      const normalised = normaliseRows(rawRows as Record<string, string | number | boolean | null>[]);
+      const normalised = normaliseRows(collected as Record<string, string | number | boolean | null>[]);
       if (!normalised.length) {
         setFileError("Online data source returned no conversations.");
         return;
