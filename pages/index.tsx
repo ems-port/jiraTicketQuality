@@ -214,6 +214,8 @@ export default function DashboardPage({
   const [agentSaveState, setAgentSaveState] = useState<Record<string, AgentSaveState>>({});
   const [agentDirectoryError, setAgentDirectoryError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [onlineLoading, setOnlineLoading] = useState(false);
+  const [onlineLoadingMessage, setOnlineLoadingMessage] = useState<string | null>(null);
   const [improvementGroupingRecord, setImprovementGroupingRecord] = useState<ImprovementGroupingRecord | null>(null);
   const [improvementGroupingLoading, setImprovementGroupingLoading] = useState(false);
   const [improvementGroupingError, setImprovementGroupingError] = useState<string | null>(null);
@@ -348,6 +350,8 @@ export default function DashboardPage({
 
   const loadOnlineData = useCallback(async () => {
     setFileError(null);
+    setOnlineLoading(true);
+    setOnlineLoadingMessage("Fetching latest conversations…");
     try {
       const maxLimit = Math.max(1, Number(process.env.NEXT_PUBLIC_CONVERSATION_FETCH_LIMIT ?? 5000));
       const pageSize = Math.max(1, Number(process.env.NEXT_PUBLIC_CONVERSATION_PAGE_SIZE ?? 200));
@@ -363,6 +367,15 @@ export default function DashboardPage({
         const payload = await response.json();
         const batch: Record<string, unknown>[] = Array.isArray(payload.rows) ? payload.rows : [];
         collected.push(...batch);
+        if (collected.length) {
+          const normalisedSoFar = normaliseRows(
+            collected as Record<string, string | number | boolean | null>[]
+          );
+          setRows(normalisedSoFar, { sampleData: false });
+          setFileName("Supabase Live DB");
+          setLatestOnlineTicket(computeLatestTicketInfo(normalisedSoFar));
+          setOnlineLoadingMessage(`Loaded ${normalisedSoFar.length.toLocaleString()} conversations…`);
+        }
         const nextOffset = typeof payload.nextOffset === "number" ? payload.nextOffset : null;
         if (!nextOffset || !batch.length) {
           break;
@@ -377,8 +390,15 @@ export default function DashboardPage({
       setRows(normalised, { sampleData: false });
       setFileName("Supabase Live DB");
       setLatestOnlineTicket(computeLatestTicketInfo(normalised));
+      setOnlineLoadingMessage(`Loaded ${normalised.length.toLocaleString()} conversations (complete).`);
     } catch (error) {
       setFileError((error as Error).message ?? "Unable to load online data.");
+      setOnlineLoadingMessage("Failed to load conversations.");
+    } finally {
+      setTimeout(() => {
+        setOnlineLoading(false);
+        setOnlineLoadingMessage(null);
+      }, 800);
     }
   }, [setRows, setFileError, setFileName]);
 
@@ -1267,6 +1287,14 @@ export default function DashboardPage({
             {fileName && (
               <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-200">
                 Active dataset: {fileName}
+              </span>
+            )}
+            {onlineLoadingMessage && (
+              <span className="flex items-center gap-2 rounded-full border border-brand-500/30 bg-brand-500/10 px-3 py-1 text-amber-100">
+                {onlineLoading && (
+                  <span className="h-3.5 w-3.5 animate-spin rounded-full border border-current border-t-transparent" />
+                )}
+                {onlineLoadingMessage}
               </span>
             )}
             {latestTicket && (
