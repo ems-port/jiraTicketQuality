@@ -7,6 +7,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TABLE = "improvement_tip_groupings";
 const PYTHON_BIN = process.env.PYTHON_PATH || "python3";
+const VERCEL_BYPASS_TOKEN = process.env.VERCEL_PROTECTION_BYPASS;
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -80,9 +81,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       // Production: proxy to the Python serverless function.
       const protocol = "https";
       const upstreamUrl = `${protocol}://${host}/api/improvement_groups`;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (VERCEL_BYPASS_TOKEN) {
+        headers["x-vercel-protection-bypass"] = VERCEL_BYPASS_TOKEN;
+      }
       const upstream = await fetch(upstreamUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(req.body ?? {})
       });
       const body = await upstream.text();
