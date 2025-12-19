@@ -8,6 +8,14 @@
     {
       "path": "/api/process",
       "schedule": "0 22 * * *"
+    },
+    {
+      "path": "/api/cron/refresh",
+      "schedule": "0 22 * * *"
+    },
+    {
+      "path": "/api/improvement-groups",
+      "schedule": "0 4 * * *"
     }
   ]
 }

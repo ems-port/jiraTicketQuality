@@ -88,33 +88,61 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (VERCEL_BYPASS_TOKEN) {
         headers["x-vercel-protection-bypass"] = VERCEL_BYPASS_TOKEN;
       }
-      const upstream = await fetch(upstreamUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(req.body ?? {})
-      });
-      const body = await upstream.text();
-      let parsed: any = body;
+      const hasBypass = Boolean(headers["x-vercel-protection-bypass"]);
+      const started = Date.now();
+      const timeoutMs = Number(process.env.IMPROVEMENT_GROUPS_TIMEOUT_MS || 220000);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        parsed = JSON.parse(body);
-      } catch {
-        // leave as text
-      }
-      if (!upstream.ok) {
-        if (upstream.status === 401) {
-          res.status(401).json({
-            error: "Upstream refresh failed (unauthorized). Set VERCEL_PROTECTION_BYPASS or VERCEL_AUTOMATION_BYPASS_SECRET.",
+        const upstream = await fetch(upstreamUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(req.body ?? {}),
+          signal: controller.signal
+        });
+        const durationMs = Date.now() - started;
+        const body = await upstream.text();
+        let parsed: any = body;
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          // leave as text
+        }
+        if (!upstream.ok) {
+          if (upstream.status === 401) {
+            res.status(401).json({
+              error: "Upstream refresh failed (unauthorized). Set VERCEL_PROTECTION_BYPASS or VERCEL_AUTOMATION_BYPASS_SECRET.",
+              status: upstream.status,
+              body: parsed,
+              hasBypassToken: hasBypass,
+              host,
+              upstreamUrl,
+              durationMs
+            });
+            return;
+          }
+          res.status(upstream.status).json({
+            error: "Upstream refresh failed",
             status: upstream.status,
-            body: parsed
+            body: parsed,
+            hasBypassToken: hasBypass,
+            host,
+            upstreamUrl,
+            durationMs
           });
           return;
         }
-        res.status(upstream.status).json({ error: "Upstream refresh failed", status: upstream.status, body: parsed });
-        return;
+        res.status(200).json({ ...parsed, durationMs, upstreamUrl });
+      } finally {
+        clearTimeout(timeout);
       }
-      res.status(200).json(parsed);
     } catch (error) {
-      res.status(500).json({ error: (error as Error).message ?? "Unable to trigger improvement groups job." });
+      res.status(500).json({
+        error: (error as Error).message ?? "Unable to trigger improvement groups job.",
+        host: req.headers.host ?? "",
+        upstream: "improvement_groups",
+        errorName: (error as Error).name ?? "Error"
+      });
     }
     return;
   }
