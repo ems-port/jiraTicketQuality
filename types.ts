@@ -117,6 +117,8 @@ export interface ConversationRow {
   resolutionMessageIndex: number | null;
   customerSentimentPrimary: SentimentLabel | null;
   customerSentimentScores: SentimentScores | null;
+  bikeQrCode?: string | null;
+  bikeQrMismatch?: string | null;
   hub?: string | null;
   model?: string | null;
   agentToxicityScore?: number | null;
