@@ -445,7 +445,8 @@ export default function DashboardPage({
     setImprovementRefreshStatus(null);
     setImprovementGroupingError(null);
     try {
-      const response = await fetch("/api/improvement-groups", {
+      // Use the Python serverless handler (mirrors ingest/process style).
+      const response = await fetch("/api/improvement_groups", {
         method: "POST",
         headers: { "Content-Type": "application/json" }
       });

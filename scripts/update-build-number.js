@@ -25,15 +25,18 @@ function ensureFullHistory() {
       process.env.VERCEL_GIT_COMMIT_REF ||
       execSync("git rev-parse --abbrev-ref HEAD").toString().trim() ||
       "main";
-    try {
-      execSync(`git fetch origin ${branch} --depth=2147483647`, { stdio: "ignore" });
-    } catch {
-      // ignore branch-specific fetch failures
-    }
-    try {
-      execSync("git fetch --unshallow", { stdio: "ignore" });
-    } catch {
-      // ignore if repository is already fully cloned or fetch not allowed
+    const attempts = [
+      `git fetch origin ${branch} --deepen=2147483647`,
+      `git fetch origin ${branch} --depth=2147483647`,
+      "git fetch --unshallow"
+    ];
+    for (const cmd of attempts) {
+      try {
+        execSync(cmd, { stdio: "ignore" });
+        break;
+      } catch {
+        // try next
+      }
     }
   } catch {
     // ignore inability to detect shallow repo
@@ -43,10 +46,19 @@ function ensureFullHistory() {
 function main() {
   ensureFullHistory();
   const gitCount = computeGitCount();
-  if (gitCount === null) {
-    throw new Error("Unable to compute git commit count for build number");
-  }
-  const buildNumber = gitCount;
+  const existing = (() => {
+    try {
+      const raw = fs.readFileSync(BUILD_INFO_PATH, "utf-8");
+      const data = JSON.parse(raw);
+      return typeof data.buildNumber !== "undefined" ? data.buildNumber : null;
+    } catch {
+      return null;
+    }
+  })();
+  const fallback =
+    process.env.VERCEL_BUILD_ID ||
+    (process.env.VERCEL_GIT_COMMIT_SHA ? process.env.VERCEL_GIT_COMMIT_SHA.slice(0, 7) : null);
+  const buildNumber = gitCount ?? existing ?? fallback ?? "dev";
   const payload = {
     buildNumber,
     updatedAt: new Date().toISOString()

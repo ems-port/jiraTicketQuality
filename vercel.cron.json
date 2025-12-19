@@ -6,7 +6,7 @@
       "schedule": "0 22 * * *"
     },
     {
-      "path": "/api/cron/improvement-groups",
+      "path": "/api/improvement_groups",
       "schedule": "0 4 * * *"
     }
   ]

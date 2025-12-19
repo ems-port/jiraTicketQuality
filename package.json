@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "next dev",
     "build:number": "node scripts/update-build-number.js",
-    "build": "next build",
+    "build": "npm run build:number && next build",
     "start": "next start",
     "test": "vitest"
   },
