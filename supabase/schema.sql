@@ -52,6 +52,10 @@ create table if not exists public.jira_processed_conversations (
     resolution_timestamp_iso timestamptz,
     resolution_message_index integer,
     contact_reason text,
+    contact_reason_v2 text,
+    contact_reason_v2_topic text,
+    contact_reason_v2_sub text,
+    contact_reason_v2_reason_id uuid references public.contact_taxonomy_reasons(id),
     contact_reason_original text,
     contact_reason_change boolean,
     reason_override_why text,
@@ -153,6 +157,33 @@ create unique index if not exists idx_contact_taxonomy_reason_unique on public.c
 
 -- Cleanup legacy column if present
 alter table if exists public.contact_taxonomy_versions drop column if exists labels;
+
+-- Aggregated stats per taxonomy reason/time window (for anomaly tracking)
+create table if not exists public.contact_taxonomy_reason_stats (
+    id uuid primary key default gen_random_uuid(),
+    version_id uuid not null references public.contact_taxonomy_versions(id) on delete cascade,
+    reason_id uuid references public.contact_taxonomy_reasons(id) on delete cascade,
+    topic text not null,
+    sub_reason text,
+    window_start timestamptz not null,
+    window_end timestamptz not null,
+    tickets_count integer not null default 0,
+    tickets_pct double precision,
+    prev_count integer,
+    prev_pct double precision,
+    delta integer,
+    delta_pct double precision,
+    z_score double precision,
+    is_anomaly boolean not null default false,
+    created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists idx_contact_taxonomy_reason_stats_window
+    on public.contact_taxonomy_reason_stats (version_id, window_start, window_end);
+create index if not exists idx_contact_taxonomy_reason_stats_reason
+    on public.contact_taxonomy_reason_stats (reason_id);
+create index if not exists idx_contact_taxonomy_reason_stats_anomaly
+    on public.contact_taxonomy_reason_stats (is_anomaly) where is_anomaly;
 
 -- Aggregated improvement tip groupings (LLM-generated themes)
 create table if not exists public.improvement_tip_groupings (

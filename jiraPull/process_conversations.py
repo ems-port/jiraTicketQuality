@@ -272,6 +272,77 @@ def parse_json_field(value: str) -> Optional[Any]:
         return None
 
 
+def split_reason(label: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    text = (label or "").strip()
+    if not text:
+        return None, None
+    if " - " in text:
+        topic, sub = text.split(" - ", 1)
+        return topic.strip() or None, sub.strip() or None
+    return text, None
+
+
+def flatten_label(topic: Optional[str], sub: Optional[str]) -> Optional[str]:
+    topic_clean = (topic or "").strip()
+    sub_clean = (sub or "").strip()
+    if not topic_clean:
+        return None
+    return f"{topic_clean} - {sub_clean}" if sub_clean else topic_clean
+
+
+def fetch_reason_map(client: Client) -> Dict[str, str]:
+    """
+    Map flattened label -> reason_id for the active (IN_USE) taxonomy, or latest version if none active.
+    """
+    version_id: Optional[str] = None
+    resp = (
+        client.table("contact_taxonomy_versions")
+        .select("id,version,status")
+        .eq("status", "IN_USE")
+        .order("version", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    if rows:
+        version_id = rows[0].get("id")
+    if not version_id:
+        resp = (
+            client.table("contact_taxonomy_versions")
+            .select("id,version,status")
+            .order("version", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if rows:
+            version_id = rows[0].get("id")
+    if not version_id:
+        return {}
+
+    reasons_resp = (
+        client.table("contact_taxonomy_reasons")
+        .select("id,topic,sub_reason,status")
+        .eq("version_id", version_id)
+        .execute()
+    )
+    reasons = reasons_resp.data or []
+    mapping: Dict[str, str] = {}
+    for reason in reasons:
+        status = (reason.get("status") or "").upper()
+        if status == "CANCELLED":
+            continue
+        topic = (reason.get("topic") or "").strip()
+        sub = (reason.get("sub_reason") or "").strip()
+        if not topic:
+            continue
+        label = f"{topic} - {sub}" if sub else topic
+        reason_id = reason.get("id")
+        if label and reason_id and label not in mapping:
+            mapping[label] = reason_id
+    return mapping
+
+
 PROCESSED_TABLE_DDL = """
 create table if not exists public.jira_processed_conversations (
     issue_key text primary key,
@@ -308,6 +379,10 @@ create table if not exists public.jira_processed_conversations (
     resolution_timestamp_iso timestamptz,
     resolution_message_index integer,
     contact_reason text,
+    contact_reason_v2 text,
+    contact_reason_v2_topic text,
+    contact_reason_v2_sub text,
+    contact_reason_v2_reason_id uuid,
     contact_reason_original text,
     contact_reason_change boolean,
     reason_override_why text,
@@ -379,6 +454,10 @@ def row_to_record(row: Dict[str, str]) -> Dict[str, Any]:
         "resolution_timestamp_iso": to_timestamp(row.get("resolution_timestamp_iso", "")),
         "resolution_message_index": to_int(row.get("resolution_message_index", "")),
         "contact_reason": corrected_reason or None,
+        "contact_reason_v2": row.get("contact_reason_v2") or None,
+        "contact_reason_v2_topic": row.get("contact_reason_v2_topic") or None,
+        "contact_reason_v2_sub": row.get("contact_reason_v2_sub") or None,
+        "contact_reason_v2_reason_id": row.get("contact_reason_v2_reason_id") or None,
         "contact_reason_original": original_reason or None,
         "contact_reason_change": contact_reason_change,
         "reason_override_why": row.get("reason_override_why") or None,
@@ -404,6 +483,7 @@ def _process_payload_worker(
     taxonomy: Sequence[str],
     max_attempts: int,
     prompt_sections: Dict[str, str],
+    reason_map: Dict[str, str],
 ) -> tuple[str, Dict[str, Any]]:
     # Introduce a small randomized delay to reduce simultaneous API calls.
     time.sleep(random.uniform(0, 0.5))
@@ -427,6 +507,13 @@ def _process_payload_worker(
                 debug_output=config.debug_prompts in {"output", "both"},
                 prompt_sections=prompt_sections,
             )
+            label = row.get("contact_reason") or row.get("contact_reason_original")
+            topic, sub = split_reason(label)
+            reason_id = reason_map.get(flatten_label(topic, sub), None)
+            row["contact_reason_v2"] = label
+            row["contact_reason_v2_topic"] = topic
+            row["contact_reason_v2_sub"] = sub
+            row["contact_reason_v2_reason_id"] = reason_id
             record = row_to_record(row)
             record["issue_key"] = issue_key
             return issue_key, record
@@ -579,6 +666,9 @@ def main() -> int:
     if config.use_llm and openai_client is None:
         logging.warning("OPENAI client unavailable; continuing without LLM results.")
         config.use_llm = False
+    reason_map: Dict[str, str] = fetch_reason_map(store.client)
+    if not reason_map:
+        logging.warning("Reason map empty; contact_reason_v2_reason_id will be null.")
 
     processed_keys = store.fetch_processed_keys()
     prepared_records = store.fetch_prepared(config.limit, processed_keys)
@@ -607,6 +697,7 @@ def main() -> int:
                 taxonomy,
                 max_attempts_per_issue,
                 prompt_sections,
+                reason_map,
             )] = (payload.get("issue_key") or "").strip()
 
     aborted = False
