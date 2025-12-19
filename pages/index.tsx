@@ -9,6 +9,7 @@ import { AgentMatrixHeatmap } from "@/components/AgentMatrixHeatmap";
 import { AgentRankList } from "@/components/AgentRankList";
 import { CustomerSentimentPanel } from "@/components/CustomerSentimentPanel";
 import { ContactReasonPanel } from "@/components/ContactReasonPanel";
+import { ContactReasonV2Panel } from "@/components/ContactReasonV2Panel";
 import { CommandCenterPanel } from "@/components/CommandCenterPanel";
 import { EscalationCard } from "@/components/EscalationCard";
 import { DrilldownTable } from "@/components/DrilldownTable";
@@ -26,6 +27,7 @@ import {
   computeAverageConversationRating,
   computeAverageDurationToResolution,
   computeContactReasonSummary,
+  computeContactReasonV2Summary,
   buildEscalationSeries,
   computeFlaggedAgents,
   computeResolvedStats,
@@ -836,6 +838,10 @@ export default function DashboardPage({
     () => computeContactReasonSummary(attributeFilteredRows, selectedWindow, referenceNow),
     [attributeFilteredRows, selectedWindow, referenceNow]
   );
+  const contactReasonV2Summary = useMemo(
+    () => computeContactReasonV2Summary(attributeFilteredRows, selectedWindow, referenceNow),
+    [attributeFilteredRows, selectedWindow, referenceNow]
+  );
 
   const agentNameMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -1497,6 +1503,7 @@ export default function DashboardPage({
             />
             <TicketVolumePanel rows={filteredRows} referenceNow={referenceNow} window={selectedWindow} />
 
+            <ContactReasonV2Panel summary={contactReasonV2Summary} window={selectedWindow} rows={attributeFilteredRows} />
             <ContactReasonPanel
               summary={contactReasonSummary}
               window={selectedWindow}

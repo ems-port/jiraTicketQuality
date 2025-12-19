@@ -101,6 +101,10 @@ export interface ConversationRow {
   improvementTip: string | null;
   ticketSummary: string | null;
   contactReason: string | null;
+  contactReasonV2?: string | null;
+  contactReasonV2Topic?: string | null;
+  contactReasonV2Sub?: string | null;
+  contactReasonV2ReasonId?: string | null;
   contactReasonOriginal: string | null;
   contactReasonChange: boolean;
   reasonOverrideWhy: string | null;
@@ -261,4 +265,28 @@ export interface ContactReasonTrendEntry {
 export interface ContactReasonSummary {
   entries: ContactReasonTrendEntry[];
   total: number;
+}
+
+export interface ContactReasonV2SubSummary {
+  sub: string | null;
+  count: number;
+  percentage: number;
+  prevCount?: number;
+  deltaCount?: number;
+  deltaPercentage?: number;
+}
+
+export interface ContactReasonV2Entry {
+  topic: string;
+  count: number;
+  percentage: number;
+  prevCount?: number;
+  deltaCount?: number;
+  deltaPercentage?: number;
+  subs: ContactReasonV2SubSummary[];
+}
+
+export interface ContactReasonV2Summary {
+  total: number;
+  entries: ContactReasonV2Entry[];
 }

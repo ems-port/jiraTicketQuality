@@ -97,6 +97,10 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
 
   const sentimentScores = parseSentimentScores(raw.customer_sentiment_scores);
   const sentimentPrimary = resolveSentimentPrimary(asString(raw.customer_sentiment_primary), sentimentScores);
+  const contactReasonV2 = asString(raw.contact_reason_v2);
+  const contactReasonV2Topic = asString(raw.contact_reason_v2_topic);
+  const contactReasonV2Sub = asString(raw.contact_reason_v2_sub);
+  const contactReasonV2ReasonId = asString(raw.contact_reason_v2_reason_id);
 
   const statusString = asString(raw.status);
   const resolved = asBoolean(
@@ -138,6 +142,10 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
     improvementTip,
     ticketSummary,
     contactReason,
+    contactReasonV2,
+    contactReasonV2Topic,
+    contactReasonV2Sub,
+    contactReasonV2ReasonId,
     contactReasonOriginal,
     contactReasonChange,
     reasonOverrideWhy,
@@ -167,6 +175,50 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
 
 export function normaliseRows(rows: PrimitiveRecord[]): ConversationRow[] {
   return rows.map(normaliseRow);
+}
+
+function aggregateContactReasonV2(rows: ConversationRow[]): ContactReasonV2Summary {
+  const total = rows.length;
+  const topicMap: Map<string, { count: number; subs: Map<string, number> }> = new Map();
+  rows.forEach((row) => {
+    const topic = row.contactReasonV2Topic || row.contactReasonV2 || null;
+    if (!topic) return;
+    const sub = row.contactReasonV2Sub || null;
+    if (!topicMap.has(topic)) {
+      topicMap.set(topic, { count: 0, subs: new Map() });
+    }
+    const entry = topicMap.get(topic)!;
+    entry.count += 1;
+    const subKey = sub || "None";
+    entry.subs.set(subKey, (entry.subs.get(subKey) || 0) + 1);
+  });
+
+  const entries: ContactReasonV2Entry[] = Array.from(topicMap.entries())
+    .map(([topic, value]) => {
+      const subs = Array.from(value.subs.entries())
+        .map(([sub, count]) => ({
+          sub: sub === "None" ? null : sub,
+          count,
+          percentage: total ? (count / total) * 100 : 0
+        }))
+        .sort((a, b) => b.count - a.count);
+      return {
+        topic,
+        count: value.count,
+        percentage: total ? (value.count / total) * 100 : 0,
+        subs
+      };
+    })
+    .sort((a, b) => b.count - a.count);
+
+  return {
+    total,
+    entries
+  };
+}
+
+function aggregateContactReasonV2FromRows(rows: ConversationRow[]): ContactReasonV2Summary {
+  return aggregateContactReasonV2(rows);
 }
 
 export function filterByWindow(
@@ -420,6 +472,51 @@ export function computeContactReasonSummary(
   return {
     entries: entries.slice(0, topLimit),
     total
+  };
+}
+
+export function computeContactReasonV2Summary(
+  rows: ConversationRow[],
+  window: TimeWindow,
+  now: Date = new Date(),
+  topLimit = 10
+): ContactReasonV2Summary {
+  const windowed = filterByWindow(rows, window, now);
+  const aggregated = aggregateContactReasonV2FromRows(windowed);
+
+  // Previous window of the same length (shifted back one window).
+  const duration = TIME_WINDOW_DURATIONS[window];
+  const prevNow = new Date(now.getTime() - duration);
+  const prevWindowed = filterByWindow(rows, window, prevNow);
+  const prevAggregated = aggregateContactReasonV2FromRows(prevWindowed);
+  const prevMap = new Map<string, { count: number; percentage: number; subs: ContactReasonV2SubSummary[] }>(
+    prevAggregated.entries.map((entry) => [entry.topic, { count: entry.count, percentage: entry.percentage, subs: entry.subs }])
+  );
+
+  const entriesWithTrend = aggregated.entries.slice(0, topLimit).map((entry) => {
+    const prev = prevMap.get(entry.topic);
+    const prevCount = prev?.count ?? 0;
+    const deltaCount = entry.count - prevCount;
+    const deltaPercentage = entry.percentage - (prev?.percentage ?? 0);
+    const prevSubs = new Map<string, { count: number; percentage: number }>();
+    if (prev?.subs) {
+      prev.subs.forEach((sub) => {
+        prevSubs.set(sub.sub ?? "None", { count: sub.count, percentage: sub.percentage });
+      });
+    }
+    const subsWithTrend = entry.subs.map((sub) => {
+      const prevSub = prevSubs.get(sub.sub ?? "None");
+      const prevSubCount = prevSub?.count ?? 0;
+      const deltaSubCount = sub.count - prevSubCount;
+      const deltaSubPercentage = sub.percentage - (prevSub?.percentage ?? 0);
+      return { ...sub, prevCount: prevSubCount, deltaCount: deltaSubCount, deltaPercentage: deltaSubPercentage };
+    });
+    return { ...entry, prevCount, deltaCount, deltaPercentage, subs: subsWithTrend };
+  });
+
+  return {
+    total: aggregated.total,
+    entries: entriesWithTrend
   };
 }
 
