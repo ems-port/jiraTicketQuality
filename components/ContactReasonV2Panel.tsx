@@ -18,7 +18,7 @@ export function ContactReasonV2Panel({ summary, window, rows }: Props) {
     rows.forEach((row) => {
       const topic = row.contactReasonV2Topic || row.contactReasonV2;
       if (!topic || !topic.toLowerCase().startsWith("ebike")) return;
-      const bike = (row.raw?.bike_qr_code as string) || (row.bikeQrCode as string) || "Unknown";
+      const bike = row.bikeQrCode || row.bikeQrMismatch || (row.raw?.bike_qr_code as string) || "Unknown";
       const sub = row.contactReasonV2Sub || "Unspecified";
       pivot[bike] = pivot[bike] || {};
       pivot[bike][sub] = (pivot[bike][sub] || 0) + 1;

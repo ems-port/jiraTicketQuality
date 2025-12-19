@@ -4,6 +4,9 @@ import {
   AgentPerformance,
   AgentPerformancePoint,
   ContactReasonSummary,
+  ContactReasonV2Entry,
+  ContactReasonV2SubSummary,
+  ContactReasonV2Summary,
   ConversationRow,
   EscalationMetricKind,
   EscalationSeriesEntry,
@@ -97,6 +100,8 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
 
   const sentimentScores = parseSentimentScores(raw.customer_sentiment_scores);
   const sentimentPrimary = resolveSentimentPrimary(asString(raw.customer_sentiment_primary), sentimentScores);
+  const bikeQrCode = asString(raw.bike_qr_code);
+  const bikeQrMismatch = asString(raw.bike_qr_mismatch);
   const contactReasonV2 = asString(raw.contact_reason_v2);
   const contactReasonV2Topic = asString(raw.contact_reason_v2_topic);
   const contactReasonV2Sub = asString(raw.contact_reason_v2_sub);
@@ -158,6 +163,8 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
     resolutionMessageIndex,
     customerSentimentPrimary: sentimentPrimary,
     customerSentimentScores: sentimentScores,
+    bikeQrCode,
+    bikeQrMismatch,
     hub: (raw.custom_field_hub as string) ?? (raw.hub as string) ?? null,
     model: (raw.llm_model as string) ?? (raw.model as string) ?? null,
     agentToxicityScore: asNumber(raw.agent_toxicity_score),
