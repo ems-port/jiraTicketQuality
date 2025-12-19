@@ -4,6 +4,21 @@ export interface DisplayNameResult {
   original: string;
 }
 
+export function buildAnonymizedLabel(id: string, baseLabel = "Hidden user"): string {
+  const label = baseLabel.trim() || "Hidden user";
+  if (!id) {
+    return label;
+  }
+  const hash = Math.abs(
+    Array.from(id).reduce((acc, char) => {
+      const next = (acc << 5) - acc + char.charCodeAt(0);
+      return next | 0;
+    }, 7)
+  );
+  const code = (hash % 1679616).toString(36).toUpperCase().padStart(4, "0");
+  return `${label} #${code}`;
+}
+
 export function resolveDisplayName(
   id: string,
   mapping: Record<string, string>,

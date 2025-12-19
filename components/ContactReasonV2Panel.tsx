@@ -69,17 +69,22 @@ export function ContactReasonV2Panel({ summary, window, rows }: Props) {
                         key={`${entry.topic}-${sub.sub ?? "none"}`}
                         className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-200"
                       >
-                        <span className="truncate">{sub.sub ?? "Unspecified"}</span>
-                        <div className="flex items-center gap-2 text-slate-400">
-                          <span>
-                            {sub.count.toLocaleString()} · {sub.percentage.toFixed(1)}%
-                          </span>
-                          {sub.deltaPercentage !== undefined && (
-                            <span className={sub.deltaPercentage >= 0 ? "text-emerald-300" : "text-rose-300"}>
-                              {sub.deltaPercentage >= 0 ? "↑" : "↓"} {sub.deltaPercentage.toFixed(1)}%
+                        <Link
+                          href={`/reason-tickets?topic=${encodeURIComponent(entry.topic)}&sub=${encodeURIComponent(sub.sub ?? "")}`}
+                          className="flex w-full items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900 px-2 py-2 text-left text-slate-200 hover:border-brand-500/50 hover:text-white"
+                        >
+                          <span className="truncate">{sub.sub ?? "Unspecified"}</span>
+                          <div className="flex items-center gap-2 text-xs text-slate-400">
+                            <span>
+                              {sub.count.toLocaleString()} · {sub.percentage.toFixed(1)}%
                             </span>
-                          )}
-                        </div>
+                            {sub.deltaPercentage !== undefined && (
+                              <span className={sub.deltaPercentage >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                                {sub.deltaPercentage >= 0 ? "↑" : "↓"} {sub.deltaPercentage.toFixed(1)}%
+                              </span>
+                            )}
+                          </div>
+                        </Link>
                       </div>
                     ))
                   ) : (

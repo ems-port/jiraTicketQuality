@@ -15,6 +15,7 @@ type ToxicityListProps = {
   entityLabel?: string;
   showAgentRoles?: boolean;
   roleMapping?: Record<string, AgentRole>;
+  anonymizedLabel?: string;
 };
 
 export function ToxicityList({
@@ -27,7 +28,8 @@ export function ToxicityList({
   deAnonymize,
   entityLabel = "Entity",
   showAgentRoles = false,
-  roleMapping = {} as Record<string, AgentRole>
+  roleMapping = {} as Record<string, AgentRole>,
+  anonymizedLabel
 }: ToxicityListProps) {
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
@@ -45,7 +47,7 @@ export function ToxicityList({
           >
             <div className="flex items-start gap-3">
               <div className="flex-1">
-                <p className="text-base font-semibold text-white">
+                <p className="text-sm font-semibold text-white">
                   <DisplayName
                     id={entry.entity}
                     mapping={mapping}
@@ -53,6 +55,7 @@ export function ToxicityList({
                     deAnonymize={deAnonymize}
                     titlePrefix={entityLabel}
                     showRole={showAgentRoles}
+                    anonymizedLabel={anonymizedLabel}
                     role={
                       showAgentRoles ? resolveAgentRole(entry.entity, roleMapping) : undefined
                     }

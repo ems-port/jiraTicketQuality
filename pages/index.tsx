@@ -1465,6 +1465,7 @@ export default function DashboardPage({
                   mapping={idMapping}
                   agentMapping={agentNameMap}
                   deAnonymize={deAnonymize}
+                  anonymizedLabel="Hidden customer"
                   entityLabel="Customer ID"
                 />
               </div>

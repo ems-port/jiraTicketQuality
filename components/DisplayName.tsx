@@ -1,6 +1,6 @@
 import clsx from "clsx";
 
-import { resolveDisplayName } from "@/lib/displayNames";
+import { buildAnonymizedLabel, resolveDisplayName } from "@/lib/displayNames";
 import { formatRoleLabel } from "@/lib/roles";
 import type { AgentRole } from "@/types";
 
@@ -13,6 +13,7 @@ type DisplayNameProps = {
   titlePrefix?: string;
   role?: AgentRole | null;
   showRole?: boolean;
+  anonymizedLabel?: string;
 };
 
 export function DisplayName({
@@ -23,9 +24,12 @@ export function DisplayName({
   className,
   titlePrefix,
   role,
-  showRole = false
+  showRole = false,
+  anonymizedLabel
 }: DisplayNameProps) {
   const result = resolveDisplayName(id, mapping, deAnonymize, agentMapping);
+  const label =
+    !deAnonymize && anonymizedLabel ? buildAnonymizedLabel(id, anonymizedLabel) : result.label;
   const pillRole: AgentRole = role ?? "NON_AGENT";
   const identityTitle = deAnonymize
     ? titlePrefix
@@ -36,7 +40,7 @@ export function DisplayName({
   const title = [identityTitle, roleTitle].filter(Boolean).join(" · ") || undefined;
   return (
     <span className={clsx("inline-flex items-center gap-2", className)} title={title}>
-      <span className={clsx(!result.mapped && deAnonymize && "italic text-slate-400")}>{result.label}</span>
+      <span className={clsx(!result.mapped && deAnonymize && "italic text-slate-400")}>{label}</span>
       {showRole && <RolePill role={pillRole} />}
     </span>
   );
