@@ -7,7 +7,10 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TABLE = "improvement_tip_groupings";
 const PYTHON_BIN = process.env.PYTHON_PATH || "python3";
-const VERCEL_BYPASS_TOKEN = process.env.VERCEL_PROTECTION_BYPASS;
+const VERCEL_BYPASS_TOKEN =
+  process.env.VERCEL_PROTECTION_BYPASS ||
+  process.env.VERCEL_AUTOMATION_BYPASS_SECRET ||
+  process.env.INTERNAL_FUNCTIONS_TOKEN;
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -98,6 +101,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         // leave as text
       }
       if (!upstream.ok) {
+        if (upstream.status === 401) {
+          res.status(401).json({
+            error: "Upstream refresh failed (unauthorized). Set VERCEL_PROTECTION_BYPASS or VERCEL_AUTOMATION_BYPASS_SECRET.",
+            status: upstream.status,
+            body: parsed
+          });
+          return;
+        }
         res.status(upstream.status).json({ error: "Upstream refresh failed", status: upstream.status, body: parsed });
         return;
       }
