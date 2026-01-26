@@ -108,6 +108,7 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
   const contactReasonV2ReasonId = asString(raw.contact_reason_v2_reason_id);
 
   const statusString = asString(raw.status);
+  const resolutionString = asString(raw.resolution);
   const resolved = asBoolean(
     raw.is_resolved ??
       raw.resolved ??
@@ -127,6 +128,8 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
     agentList: agentList.length ? agentList : [agent],
     customerList: customerList.length ? customerList : ["Customer"],
     resolved,
+    status: statusString || null,
+    resolution: resolutionString || null,
     startedAt,
     endedAt,
     durationMinutes,
@@ -182,6 +185,18 @@ export function normaliseRow(raw: PrimitiveRecord): ConversationRow {
 
 export function normaliseRows(rows: PrimitiveRecord[]): ConversationRow[] {
   return rows.map(normaliseRow);
+}
+
+const DUPLICATE_STATUS_VALUES = new Set([
+  "duplicate",
+  "duplicate (multiple conversations)",
+  "duplicate (multiple conversation)"
+]);
+
+export function isDuplicateConversation(row: ConversationRow): boolean {
+  const status = row.status?.trim().toLowerCase() ?? "";
+  const resolution = row.resolution?.trim().toLowerCase() ?? "";
+  return DUPLICATE_STATUS_VALUES.has(status) || DUPLICATE_STATUS_VALUES.has(resolution);
 }
 
 function aggregateContactReasonV2(rows: ConversationRow[]): ContactReasonV2Summary {
@@ -610,6 +625,7 @@ export function computeToxicCustomers(
   const aggregations = new Map<
     string,
     {
+      toxicity: number[];
       tickets: Set<string>;
       messageCount: number;
       totalTickets: number;
@@ -640,6 +656,7 @@ export function computeToxicCustomers(
       const bucket =
         aggregations.get(key) ??
         {
+          toxicity: [],
           tickets: new Set<string>(),
           messageCount: 0,
           totalTickets: 0,
@@ -649,6 +666,7 @@ export function computeToxicCustomers(
           customerScoreCount: 0,
           abusiveTicketKeys: new Set<string>()
         };
+      bucket.toxicity.push(toxicityValue);
       bucket.tickets.add(row.issueKey);
       bucket.messageCount += messageCount;
       bucket.totalTickets += 1;
@@ -666,7 +684,7 @@ export function computeToxicCustomers(
   });
 
   const entries: ToxicityEntry[] = Array.from(aggregations.entries()).map(([entity, data]) => {
-    const meanToxicity = data.swearCount * data.abusiveTickets;
+    const meanToxicity = calculateMean(data.toxicity) ?? 0;
     const averageCustomerScore =
       data.customerScoreCount > 0 ? data.customerScoreTotal / data.customerScoreCount : null;
     return {
@@ -683,7 +701,7 @@ export function computeToxicCustomers(
   });
 
   return entries
-    .filter((entry) => entry.abusiveTicketCount > 0)
+    .filter((entry) => entry.meanToxicity > 0)
     .sort((a, b) => b.meanToxicity - a.meanToxicity)
     .slice(0, limit);
 }
@@ -761,6 +779,7 @@ export function computeAgentMatrix(
       resolutionDurationTotal: number;
       resolutionDurationCount: number;
       misclassifiedCount: number;
+      misclassifiedEligibleCount: number;
       agentScoreTotal: number;
       agentScoreCount: number;
     }
@@ -791,9 +810,12 @@ export function computeAgentMatrix(
           resolutionDurationTotal: 0,
           resolutionDurationCount: 0,
           misclassifiedCount: 0,
+          misclassifiedEligibleCount: 0,
           agentScoreTotal: 0,
           agentScoreCount: 0
         };
+
+      const isDuplicate = isDuplicateConversation(row);
 
       if (typeof row.firstAgentResponseMinutes === "number") {
         bucket.firstResponseTotal += row.firstAgentResponseMinutes;
@@ -819,7 +841,10 @@ export function computeAgentMatrix(
       if (qualifies && owner && agentName === owner) {
         bucket.escalatedCount += 1;
       }
-      if (row.contactReasonChange && owner && agentName === owner) {
+      if (!isDuplicate) {
+        bucket.misclassifiedEligibleCount += 1;
+      }
+      if (!isDuplicate && row.contactReasonChange && owner && agentName === owner) {
         bucket.misclassifiedCount += 1;
       }
 
@@ -844,7 +869,9 @@ export function computeAgentMatrix(
       escalatedCount: data.escalatedCount,
       misclassifiedCount: data.misclassifiedCount,
       misclassifiedPercent:
-        data.totalCount > 0 ? data.misclassifiedCount / data.totalCount : null,
+        data.misclassifiedEligibleCount > 0
+          ? data.misclassifiedCount / data.misclassifiedEligibleCount
+          : null,
       ticketCount: data.totalCount
     }))
     .sort((a, b) => a.agent.localeCompare(b.agent));

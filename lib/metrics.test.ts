@@ -31,6 +31,8 @@ function makeRow(overrides: Partial<ConversationRow>): ConversationRow {
     agentList: overrides.agentList ?? [overrides.agent ?? "Agent Alpha"],
     customerList: overrides.customerList ?? ["Customer Z"],
     resolved: overrides.resolved ?? false,
+    status: overrides.status ?? null,
+    resolution: overrides.resolution ?? null,
     startedAt: overrides.startedAt ?? NOW,
     endedAt: overrides.endedAt ?? NOW,
     durationMinutes: overrides.durationMinutes ?? 30,
@@ -134,6 +136,7 @@ describe("time window helpers", () => {
 const roleMapping: Record<string, AgentRole> = {
   "Agent Alpha": "TIER1",
   "Agent Beta": "TIER2",
+  "Agent B": "TIER2",
   "Agent Matrix": "TIER1",
   "Agent Assist": "TIER2"
 };
@@ -293,6 +296,37 @@ describe("computeAgentMatrix", () => {
       roleFilter: "TIER2"
     });
     expect(matrix.find((entry) => entry.agent === "Agent Matrix")).toBeUndefined();
+  });
+
+  it("ignores duplicate conversations for misclassification metrics", () => {
+    const matrix = computeAgentMatrix(
+      [
+        makeRow({
+          issueKey: "DUP-1",
+          agentList: ["Agent Matrix"],
+          contactReasonChange: true,
+          status: "Done",
+          resolution: "Duplicate"
+        }),
+        makeRow({
+          issueKey: "DUP-2",
+          agentList: ["Agent Matrix"],
+          contactReasonChange: true,
+          status: "Done",
+          resolution: "Done"
+        })
+      ],
+      "30d",
+      NOW,
+      {
+        roleMapping,
+        escalationMetric: "handoff"
+      }
+    );
+
+    const agentRow = matrix.find((entry) => entry.agent === "Agent Matrix");
+    expect(agentRow?.misclassifiedCount).toBe(1);
+    expect(agentRow?.misclassifiedPercent).toBeCloseTo(1);
   });
 });
 

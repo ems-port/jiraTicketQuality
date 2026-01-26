@@ -81,6 +81,8 @@ export interface ConversationRow {
   agentList: string[];
   customerList: string[];
   resolved: boolean;
+  status: string | null;
+  resolution: string | null;
   startedAt: Date | null;
   endedAt: Date | null;
   durationMinutes: number | null;
