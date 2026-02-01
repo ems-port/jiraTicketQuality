@@ -7,7 +7,6 @@ Default scope: last 7 days of jira_prepared_conversations, updating matching row
 jira_processed_conversations.
 
 Usage examples:
-  python scripts/backfill_contact_reason_v2.py --taxonomy-file local_data/taxonomy_v2.json
   python scripts/backfill_contact_reason_v2.py --days 14 --limit 200 --model gpt-4o-mini
   python scripts/backfill_contact_reason_v2.py --dry-run
 
@@ -40,11 +39,11 @@ import analysis.convo_quality as cq  # type: ignore
 
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="Backfill contact_reason_v2 for recent conversations.")
-  parser.add_argument("--taxonomy-file", default="local_data/taxonomy_v2.json", help="Path to taxonomy file (expects JSON with labels[] or array of strings). Ignored if --use-supabase-taxonomy is set.")
-  parser.add_argument("--use-supabase-taxonomy", action="store_true", help="Load active taxonomy from Supabase instead of a local file.")
+  parser.add_argument("--taxonomy-file", default=None, help="Optional taxonomy file (JSON array or labels[]). If omitted, Supabase taxonomy is used.")
+  parser.add_argument("--use-supabase-taxonomy", action="store_true", help="Force active taxonomy from Supabase even when --taxonomy-file is provided.")
   parser.add_argument("--enrich-taxonomy", action="store_true", help="Include descriptions/keywords in the taxonomy entries passed to the LLM.")
   parser.add_argument("--print-prompt", action="store_true", help="Print the taxonomy prompt block before running classification.")
-  parser.add_argument("--print-llm-prompts", action="store_true", help="Print system and user prompts for each classification.")
+  parser.add_argument(" python scripts/backfill_contact_reason_v2.py --days 14 --limit 200 --model gpt-4o-mini", action="store_true", help="Print system and user prompts for each classification.")
   parser.add_argument("--print-llm-output", action="store_true", help="Print raw LLM response payload for each classification.")
   parser.add_argument("--prepared-table", default="jira_prepared_conversations", help="Supabase table for prepared conversations.")
   parser.add_argument("--processed-table", default="jira_processed_conversations", help="Supabase table for processed conversations.")
@@ -392,12 +391,12 @@ def main() -> int:
   logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(message)s")
 
   client = ensure_client()
-  if args.use_supabase_taxonomy:
-    labels, prompt_block, rich_lines = fetch_active_taxonomy(client, include_keywords=args.enrich_taxonomy)
-    taxonomy = rich_lines if args.enrich_taxonomy else labels
-  else:
+  if args.taxonomy_file and not args.use_supabase_taxonomy:
     taxonomy = load_taxonomy_labels(args.taxonomy_file)
     prompt_block = "\n".join(taxonomy)
+  else:
+    labels, prompt_block, rich_lines = fetch_active_taxonomy(client, include_keywords=args.enrich_taxonomy)
+    taxonomy = rich_lines if args.enrich_taxonomy else labels
 
   if not taxonomy:
     raise SystemExit("Taxonomy labels cannot be empty.")

@@ -29,6 +29,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     auth: { persistSession: false, autoRefreshToken: false }
   });
 
+  const issueKeyRaw = Array.isArray(req.query.issue_key) ? req.query.issue_key[0] : req.query.issue_key;
+  const issueKey = typeof issueKeyRaw === "string" ? issueKeyRaw.trim().toUpperCase() : "";
+
+  if (issueKey) {
+    const { data, error } = await client
+      .from(PREPARED_TABLE)
+      .select("issue_key,payload,prepared_at")
+      .eq("issue_key", issueKey)
+      .maybeSingle();
+
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+    if (!data) {
+      res.status(404).json({ error: "No prepared conversation found for that issue key." });
+      return;
+    }
+    res.status(200).json({ entry: data });
+    return;
+  }
+
   const { data, error } = await client
     .from(PREPARED_TABLE)
     .select("issue_key,payload,prepared_at")

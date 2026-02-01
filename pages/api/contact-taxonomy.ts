@@ -188,9 +188,10 @@ async function handlePut(req: NextApiRequest, res: NextApiResponse) {
   const createdBy = typeof payload.created_by === "string" && payload.created_by.trim().length > 0 ? payload.created_by : "dashboard_ui";
   const notes = typeof payload.notes === "string" ? payload.notes : null;
   const statusInput = typeof payload.status === "string" ? payload.status.trim().toUpperCase() : "NEW";
-  const status: TaxonomyStatus = STATUS_VALUES.includes(statusInput as TaxonomyStatus)
+  const desiredStatus: TaxonomyStatus = STATUS_VALUES.includes(statusInput as TaxonomyStatus)
     ? (statusInput as TaxonomyStatus)
     : "NEW";
+  const insertStatus: TaxonomyStatus = desiredStatus === "IN_USE" ? "NEW" : desiredStatus;
 
   const latest = await fetchLatest(client);
   const nextVersion = latest ? (latest.version ?? 0) + 1 : 1;
@@ -200,7 +201,7 @@ async function handlePut(req: NextApiRequest, res: NextApiResponse) {
     .insert({
       version: nextVersion,
       notes,
-      status,
+      status: insertStatus,
       created_by: createdBy
     })
     .select("id,version,notes,status,created_at,created_by")
@@ -224,17 +225,30 @@ async function handlePut(req: NextApiRequest, res: NextApiResponse) {
     res.status(500).json({ error: reasonError.message });
     return;
   }
-  // If promoting to IN_USE, demote any prior IN_USE rows to OBSOLETED for single-active semantics.
-  if (status === "IN_USE") {
-    await client
+  // If promoting to IN_USE, demote any prior IN_USE rows before promoting this version.
+  if (desiredStatus === "IN_USE") {
+    const { error: demoteError } = await client
       .from("contact_taxonomy_versions")
       .update({ status: "OBSOLETED" })
       .eq("status", "IN_USE")
-      .neq("version", nextVersion);
+      .neq("id", versionId);
+    if (demoteError) {
+      res.status(500).json({ error: demoteError.message });
+      return;
+    }
+    const { error: promoteError } = await client
+      .from("contact_taxonomy_versions")
+      .update({ status: "IN_USE" })
+      .eq("id", versionId);
+    if (promoteError) {
+      res.status(500).json({ error: promoteError.message });
+      return;
+    }
   }
 
   const created: ContactTaxonomyRow = {
     ...versionData,
+    status: desiredStatus,
     reasons,
     labels: flattenTaxonomyEntries(reasons.filter((reason) => reason.status !== "CANCELLED"))
   };

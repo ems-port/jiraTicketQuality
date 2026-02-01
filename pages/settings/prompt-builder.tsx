@@ -134,6 +134,11 @@ export default function PromptBuilderPage() {
   >([]);
   const [selectedPrepared, setSelectedPrepared] = useState<string>("");
   const [preparedInitialized, setPreparedInitialized] = useState(false);
+  const [manualIssueKey, setManualIssueKey] = useState("");
+  const [preparedError, setPreparedError] = useState<string | null>(null);
+  const [manualLoading, setManualLoading] = useState(false);
+
+  const MANUAL_OPTION = "__manual__";
 
   const handlePromptChange = useCallback((type: PromptConfigType, value: string) => {
     setPromptConfigs((prev) => ({ ...prev, [type]: value }));
@@ -222,7 +227,26 @@ export default function PromptBuilderPage() {
       const body = await response.json();
       const taxonomy = body?.taxonomy;
       if (taxonomy?.reasons && Array.isArray(taxonomy.reasons) && taxonomy.reasons.length) {
-        setTaxonomyReasons(taxonomy.reasons);
+        setTaxonomyReasons(
+          taxonomy.reasons.filter((reason: any) => (reason?.status ?? "IN_USE") !== "CANCELLED")
+        );
+        return;
+      }
+      if (taxonomy?.labels && Array.isArray(taxonomy.labels)) {
+        const converted = taxonomy.labels
+          .filter((label: any) => typeof label === "string" && label.trim().length > 0)
+          .map((label: string) => {
+            const [topic, ...rest] = label.split(" - ");
+            const sub = rest.join(" - ").trim();
+            return {
+              topic: topic.trim(),
+              sub_reason: sub || null,
+              status: "IN_USE"
+            };
+          });
+        if (converted.length) {
+          setTaxonomyReasons(converted);
+        }
       }
     } catch {
       // ignore, fall back to defaults
@@ -280,18 +304,22 @@ export default function PromptBuilderPage() {
 
       const taxonomyBlock = taxonomyReasons
         .map((entry: any) => {
+          if ((entry?.status ?? "IN_USE") === "CANCELLED") return null;
           const topic = String(entry?.topic ?? "").trim();
           if (!topic) return null;
           const sub = entry?.sub_reason ? String(entry.sub_reason).trim() : "";
-          const keywords = Array.isArray(entry?.keywords) ? entry.keywords.filter((kw: any) => typeof kw === "string" && kw.trim()).slice(0, 3) : [];
-          const parts = [`- ${topic}`];
-          if (sub) {
-            parts[0] = `${parts[0]}: ${sub}`;
+          const description = entry?.description ? String(entry.description).trim() : "";
+          const keywords = Array.isArray(entry?.keywords)
+            ? entry.keywords.filter((kw: any) => typeof kw === "string" && kw.trim()).slice(0, 3)
+            : [];
+          const parts = [`- ${topic}${sub ? ` — ${sub}` : ""}`];
+          if (description) {
+            parts.push(`When: ${description}`);
           }
           if (keywords.length) {
-            parts[0] = `${parts[0]} (${keywords.join(", ")})`;
+            parts.push(`Keywords: ${keywords.join(", ")}`);
           }
-          return parts.join("");
+          return parts.join(" | ");
         })
         .filter(Boolean)
         .join("\n");
@@ -327,8 +355,9 @@ export default function PromptBuilderPage() {
   );
 
   const loadPreparedConversations = useCallback(async () => {
+    setPreparedError(null);
     try {
-      const response = await fetch("/api/prepared-conversations?limit=10");
+      const response = await fetch("/api/prepared-conversations?limit=5");
       if (!response.ok) return;
       const body = await response.json();
       const entries = Array.isArray(body?.entries) ? body.entries : [];
@@ -345,7 +374,8 @@ export default function PromptBuilderPage() {
         return;
       }
       const hasSelection =
-        selectedPrepared && mapped.some((item: { issue_key: string }) => item.issue_key === selectedPrepared);
+        selectedPrepared === MANUAL_OPTION ||
+        (selectedPrepared && mapped.some((item: { issue_key: string }) => item.issue_key === selectedPrepared));
       if (!preparedInitialized && mapped.length) {
         setSelectedPrepared(mapped[0].issue_key);
         setConversationContext(mapped[0].contextText);
@@ -360,7 +390,76 @@ export default function PromptBuilderPage() {
     } catch {
       // ignore
     }
-  }, [buildContextFromPrepared, preparedInitialized, selectedPrepared]);
+  }, [buildContextFromPrepared, preparedInitialized, selectedPrepared, MANUAL_OPTION]);
+
+  const handleManualLoad = useCallback(async () => {
+    const issueKey = manualIssueKey.trim().toUpperCase();
+    setPreparedError(null);
+    if (!issueKey) {
+      setPreparedError("Enter an issue key to load.");
+      return;
+    }
+    setManualLoading(true);
+    try {
+      const response = await fetch(`/api/prepared-conversations?issue_key=${encodeURIComponent(issueKey)}`);
+      if (!response.ok) {
+        const bodyText = await response.text();
+        let message = bodyText || "No prepared conversation found for that issue key.";
+        try {
+          const parsed = JSON.parse(bodyText);
+          if (parsed?.error) {
+            message = parsed.error;
+          }
+        } catch {
+          // ignore JSON parse errors
+        }
+        setPreparedError(message);
+        return;
+      }
+      const body = await response.json();
+      const entry = body?.entry;
+      if (!entry?.issue_key) {
+        setPreparedError("No prepared conversation found for that issue key.");
+        return;
+      }
+      const contextText = buildContextFromPrepared(entry.payload ?? {});
+      setPreparedOptions((prev) => {
+        const existingIndex = prev.findIndex((item) => item.issue_key === entry.issue_key);
+        const nextEntry = {
+          issue_key: entry.issue_key,
+          prepared_at: entry.prepared_at ?? null,
+          payload: entry.payload ?? {},
+          contextText
+        };
+        if (existingIndex >= 0) {
+          const next = [...prev];
+          next[existingIndex] = nextEntry;
+          return next;
+        }
+        return [nextEntry, ...prev];
+      });
+      setSelectedPrepared(entry.issue_key);
+      setConversationContext(contextText);
+    } catch (error) {
+      setPreparedError((error as Error).message ?? "Unable to load that issue key.");
+    } finally {
+      setManualLoading(false);
+    }
+  }, [buildContextFromPrepared, manualIssueKey]);
+
+  useEffect(() => {
+    if (!preparedOptions.length) return;
+    if (selectedPrepared === MANUAL_OPTION) return;
+    const updated = preparedOptions.map((item) => ({
+      ...item,
+      contextText: buildContextFromPrepared(item.payload)
+    }));
+    setPreparedOptions(updated);
+    const current = updated.find((item) => item.issue_key === selectedPrepared) ?? updated[0];
+    if (current) {
+      setConversationContext(current.contextText);
+    }
+  }, [buildContextFromPrepared]);
 
   useEffect(() => {
     void loadPromptConfigs();
@@ -537,6 +636,10 @@ export default function PromptBuilderPage() {
                 onChange={(event) => {
                   const value = event.target.value;
                   setSelectedPrepared(value);
+                  setPreparedError(null);
+                  if (value === MANUAL_OPTION) {
+                    return;
+                  }
                   const match = preparedOptions.find((item) => item.issue_key === value);
                   if (match) {
                     setConversationContext(match.contextText);
@@ -550,19 +653,36 @@ export default function PromptBuilderPage() {
                     {item.issue_key} {item.prepared_at ? `· ${new Date(item.prepared_at).toLocaleString()}` : ""}
                   </option>
                 ))}
+                <option value={MANUAL_OPTION}>Enter ticket ID manually…</option>
               </select>
+              {selectedPrepared === MANUAL_OPTION && (
+                <input
+                  type="text"
+                  value={manualIssueKey}
+                  onChange={(event) => {
+                    setManualIssueKey(event.target.value);
+                    setPreparedError(null);
+                  }}
+                  placeholder="Issue key (e.g. CC-12345)"
+                  className="min-w-[200px] rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                />
+              )}
               <button
                 type="button"
                 onClick={() => {
+                  if (selectedPrepared === MANUAL_OPTION) {
+                    void handleManualLoad();
+                    return;
+                  }
                   const match = preparedOptions.find((item) => item.issue_key === selectedPrepared);
                   if (match) {
                     setConversationContext(match.contextText);
                   }
                 }}
                 className="rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-brand-500 hover:text-brand-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
-                disabled={!selectedPrepared}
+                disabled={!selectedPrepared || (selectedPrepared === MANUAL_OPTION && manualLoading)}
               >
-                Load ticket
+                {manualLoading ? "Loading…" : "Load ticket"}
               </button>
               <button
                 type="button"
@@ -584,6 +704,11 @@ export default function PromptBuilderPage() {
               </button>
             </div>
           </div>
+          {preparedError && (
+            <p className="mb-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+              {preparedError}
+            </p>
+          )}
           <textarea
             className="h-48 w-full rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
             placeholder="Paste conversation meta + transcript..."

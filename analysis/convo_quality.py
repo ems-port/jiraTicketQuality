@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from dateutil import parser as dt_parser
 from tqdm import tqdm
@@ -32,22 +32,6 @@ except ImportError:  # pragma: no cover - optional dependency
     tiktoken = None
 
 KEYWORD_CONTACT_MAP: Dict[str, Sequence[str]] = {}
-AGENT_CONTACT_HEADINGS: Sequence[str] = ()
-
-try:
-    from analysis.default_taxonomy import (  # type: ignore
-        AGENT_CONTACT_HEADINGS as _AGENT_CONTACT_HEADINGS,
-        KEYWORD_CONTACT_MAP as _KEYWORD_CONTACT_MAP,
-    )
-
-    AGENT_CONTACT_HEADINGS = _AGENT_CONTACT_HEADINGS
-    KEYWORD_CONTACT_MAP = dict(_KEYWORD_CONTACT_MAP)
-except ImportError:
-    try:
-        from default_taxonomy import AGENT_CONTACT_HEADINGS as _AGENT_CONTACT_HEADINGS  # type: ignore
-    except ImportError:
-        AGENT_CONTACT_HEADINGS = ()
-    KEYWORD_CONTACT_MAP = {}
 
 try:  # pragma: no cover - optional dependency
     from dotenv import load_dotenv
@@ -119,6 +103,32 @@ def format_taxonomy_block(taxonomy: Sequence[str], hints_per_label: int) -> str:
 
 def _dedent(text: str) -> str:
     return textwrap.dedent(text).strip()
+
+
+def _labels_from_payload(payload: Any) -> List[str]:
+    if isinstance(payload, Mapping):
+        reasons = payload.get("reasons")
+        labels = payload.get("labels")
+        if isinstance(reasons, list):
+            cleaned: List[str] = []
+            for reason in reasons:
+                if not isinstance(reason, Mapping):
+                    continue
+                status = str(reason.get("status") or "").upper()
+                if status == "CANCELLED":
+                    continue
+                topic = str(reason.get("topic") or "").strip()
+                sub = str(reason.get("sub_reason") or "").strip()
+                if not topic:
+                    continue
+                cleaned.append(f"{topic} - {sub}" if sub else topic)
+            if cleaned:
+                return cleaned
+        if isinstance(labels, list):
+            return [str(label).strip() for label in labels if str(label).strip()]
+    if isinstance(payload, list):
+        return [str(label).strip() for label in payload if str(label).strip()]
+    return []
 
 
 def _extract_json_payload(content: str) -> Dict[str, Any]:
@@ -736,10 +746,11 @@ def load_taxonomy(path: Optional[str]) -> Sequence[str]:
         else:
             try:
                 data = json.loads(file_path.read_text(encoding="utf-8"))
-                if isinstance(data, list) and all(isinstance(item, str) for item in data):
-                    return tuple(data)
+                labels = _labels_from_payload(data)
+                if labels:
+                    return tuple(labels)
                 print(
-                    "[warn] taxonomy file must contain a JSON array of strings; using default taxonomy.",
+                    "[warn] taxonomy file must contain a JSON array or V2 payload; using Supabase taxonomy.",
                     file=sys.stderr,
                 )
             except json.JSONDecodeError as exc:  # pragma: no cover - invalid file
@@ -752,8 +763,8 @@ def load_taxonomy(path: Optional[str]) -> Sequence[str]:
         except Exception as exc:
             if getattr(_CONFIG_STORE, "require_remote", False):
                 raise
-            _CONFIG_LOG.warning("Falling back to default taxonomy: %s", exc)
-    return AGENT_CONTACT_HEADINGS
+            _CONFIG_LOG.warning("Falling back to empty taxonomy: %s", exc)
+    return ()
 
 
 def estimate_tokens(text: str, model: str) -> int:

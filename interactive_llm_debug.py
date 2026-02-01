@@ -35,19 +35,15 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
 }
 
 OpenAIClient = tuple[str, Any]
+KEYWORD_CONTACT_MAP: Dict[str, Sequence[str]] = {}
+
 try:
-    from analysis.default_taxonomy import (  # type: ignore
-        AGENT_CONTACT_HEADINGS,
-        KEYWORD_CONTACT_MAP,
-    )
-    DEFAULT_TAXONOMY: Sequence[str] = AGENT_CONTACT_HEADINGS
+    from analysis.project_config import ProjectConfigStore  # type: ignore
 except ImportError:
     try:
-        from default_taxonomy import AGENT_CONTACT_HEADINGS, KEYWORD_CONTACT_MAP  # type: ignore
-        DEFAULT_TAXONOMY = AGENT_CONTACT_HEADINGS
+        from project_config import ProjectConfigStore  # type: ignore
     except ImportError:
-        DEFAULT_TAXONOMY = ()
-        KEYWORD_CONTACT_MAP = {}
+        ProjectConfigStore = None  # type: ignore
 
 
 def build_system_prompt(
@@ -254,17 +250,63 @@ def count_records(path: Path, start: int, limit: int) -> int:
     return count
 
 
+def _labels_from_payload(payload: Any) -> Sequence[str]:
+    if isinstance(payload, dict):
+        reasons = payload.get("reasons")
+        labels = payload.get("labels")
+        if isinstance(reasons, list):
+            cleaned: list[str] = []
+            for reason in reasons:
+                if not isinstance(reason, dict):
+                    continue
+                status = str(reason.get("status") or "").upper()
+                if status == "CANCELLED":
+                    continue
+                topic = str(reason.get("topic") or "").strip()
+                sub = str(reason.get("sub_reason") or "").strip()
+                if not topic:
+                    continue
+                cleaned.append(f"{topic} - {sub}" if sub else topic)
+            if cleaned:
+                return cleaned
+        if isinstance(labels, list):
+            return [str(label).strip() for label in labels if str(label).strip()]
+    if isinstance(payload, list):
+        return [str(label).strip() for label in payload if str(label).strip()]
+    return []
+
+
+def _load_taxonomy_from_file(path: Path) -> Sequence[str]:
+    if not path.exists():
+        return ()
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    labels = _labels_from_payload(payload)
+    return tuple(labels)
+
+
+def _load_default_taxonomy() -> Sequence[str]:
+    if ProjectConfigStore is not None:
+        try:
+            store = ProjectConfigStore()
+            taxonomy = store.get_contact_taxonomy()
+            if taxonomy:
+                return taxonomy
+        except Exception:
+            pass
+    return ()
+
+
 def load_taxonomy(path: Optional[str]) -> Sequence[str]:
-    if path is None:
-        return DEFAULT_TAXONOMY
-    file_path = Path(path)
-    if not file_path.exists():
-        raise SystemExit(f"Taxonomy file not found: {path}")
-    with file_path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
-        raise SystemExit("Taxonomy file must be a JSON array of strings.")
-    return tuple(item.strip() for item in data if item.strip())
+    if path:
+        file_path = Path(path)
+        if not file_path.exists():
+            raise SystemExit(f"Taxonomy file not found: {path}")
+        labels = _load_taxonomy_from_file(file_path)
+        if not labels:
+            raise SystemExit("Taxonomy file must be a JSON array or V2 payload.")
+        return labels
+    return _load_default_taxonomy()
 
 
 def build_prompt(

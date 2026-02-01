@@ -172,14 +172,8 @@ PROMPT_JSON_SCHEMA_DEFAULT = _dedent(
 
 
 def default_contact_taxonomy() -> Dict[str, Any]:
-    try:
-        from analysis.default_taxonomy import AGENT_CONTACT_HEADINGS  # type: ignore
-    except Exception:
-        try:
-            from default_taxonomy import AGENT_CONTACT_HEADINGS  # type: ignore
-        except Exception:
-            AGENT_CONTACT_HEADINGS = ()
-    return {"reasons": [{"topic": str(label).strip(), "status": "IN_USE"} for label in AGENT_CONTACT_HEADINGS if str(label).strip()]}
+    """No local fallback; Supabase is the source of truth."""
+    return {"reasons": []}
 
 
 def default_internal_users(csv_path: Path = Path("data/port_roles.csv")) -> Dict[str, Any]:

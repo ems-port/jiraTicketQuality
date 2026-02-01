@@ -46,6 +46,7 @@ export default function SettingsPage() {
   const setDebugLLM = useDashboardStore((state) => state.setDebugLLM);
 
   const [taxonomyReasons, setTaxonomyReasons] = useState<ContactTaxonomyReason[]>(DEFAULT_CONTACT_TAXONOMY_ENTRIES);
+  const [taxonomyBaseline, setTaxonomyBaseline] = useState<ContactTaxonomyReason[] | null>(null);
   const [taxonomyMeta, setTaxonomyMeta] = useState<{ version: number; updated_at?: string | null; updated_by?: string | null }>({ version: 1 });
   const [taxonomySaving, setTaxonomySaving] = useState(false);
   const [taxonomyError, setTaxonomyError] = useState<string | null>(null);
@@ -113,6 +114,7 @@ export default function SettingsPage() {
         if (taxonomy?.reasons && Array.isArray(taxonomy.reasons)) {
           const normalized = normalizeReasons(taxonomy.reasons);
           setTaxonomyReasons(normalized.length ? normalized : DEFAULT_CONTACT_TAXONOMY_ENTRIES);
+          setTaxonomyBaseline(normalized.length ? normalized : DEFAULT_CONTACT_TAXONOMY_ENTRIES);
           setTaxonomyMeta({
             version: taxonomy.version ?? 1,
             updated_at: taxonomy.created_at ?? null,
@@ -131,6 +133,7 @@ export default function SettingsPage() {
             taxonomy.labels.filter((label: unknown) => typeof label === "string" && label.trim().length > 0)
           );
           setTaxonomyReasons(fromLabels.length ? fromLabels : DEFAULT_CONTACT_TAXONOMY_ENTRIES);
+          setTaxonomyBaseline(fromLabels.length ? fromLabels : DEFAULT_CONTACT_TAXONOMY_ENTRIES);
           setTaxonomyMeta({
             version: taxonomy.version ?? 1,
             updated_at: taxonomy.created_at ?? null,
@@ -147,6 +150,7 @@ export default function SettingsPage() {
         }
       } else {
         setTaxonomyReasons(DEFAULT_CONTACT_TAXONOMY_ENTRIES);
+        setTaxonomyBaseline(DEFAULT_CONTACT_TAXONOMY_ENTRIES);
         setTaxonomyMeta({ version: 1 });
         setTaxonomyStatus("IN_USE");
       }
@@ -182,29 +186,41 @@ export default function SettingsPage() {
     []
   );
 
-  const handleTaxonomySave = useCallback(async () => {
+  const normalizeForSave = useCallback((reasons: ContactTaxonomyReason[]) => {
+    return reasons
+      .map((reason, idx) => ({
+        topic: (reason.topic ?? "").trim(),
+        sub_reason: (reason.sub_reason ?? "").trim() || null,
+        description: (reason.description ?? "").trim() || null,
+        keywords: Array.isArray(reason.keywords)
+          ? reason.keywords.map((kw) => kw.trim()).filter(Boolean)
+          : [],
+        sort_order: idx,
+        status: reason.status ?? "IN_USE"
+      }))
+      .filter((reason) => reason.topic.length > 0);
+  }, []);
+
+  const formatReasonLabel = useCallback((reason: ContactTaxonomyReason | undefined) => {
+    if (!reason) return "Unknown reason";
+    const topic = (reason.topic ?? "").trim();
+    const sub = (reason.sub_reason ?? "").trim();
+    return sub ? `${topic} - ${sub}` : topic || "Untitled reason";
+  }, []);
+
+  const handleTaxonomySave = useCallback(async (reasonsOverride?: ContactTaxonomyReason[], notes?: string, updateReasons = true) => {
     setTaxonomySaving(true);
     setTaxonomyError(null);
     try {
-      const cleaned = taxonomyReasons
-        .map((reason, idx) => ({
-          topic: (reason.topic ?? "").trim(),
-          sub_reason: (reason.sub_reason ?? "").trim() || null,
-          description: (reason.description ?? "").trim() || null,
-          keywords: Array.isArray(reason.keywords)
-            ? reason.keywords.map((kw) => kw.trim()).filter(Boolean)
-            : [],
-          sort_order: idx,
-          status: reason.status ?? "IN_USE"
-        }))
-        .filter((reason) => reason.topic.length > 0);
+      const sourceReasons = reasonsOverride ?? taxonomyReasons;
+      const cleaned = normalizeForSave(sourceReasons);
       if (!cleaned.length) {
         throw new Error("Provide at least one contact taxonomy topic.");
       }
       const response = await fetch("/api/contact-taxonomy", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reasons: cleaned, created_by: "settings_ui", status: taxonomyStatus })
+        body: JSON.stringify({ reasons: cleaned, created_by: "settings_ui", status: taxonomyStatus, notes })
       });
       if (!response.ok) {
         const text = await response.text();
@@ -217,12 +233,120 @@ export default function SettingsPage() {
         updated_at: entry?.created_at ?? new Date().toISOString(),
         updated_by: entry?.created_by ?? "settings_ui"
       });
+      if (typeof entry?.status === "string") {
+        const status = entry.status.toUpperCase();
+        setTaxonomyStatus(
+          status === "NEW" || status === "IN_USE" || status === "OBSOLETED" || status === "CANCELLED"
+            ? (status as ContactTaxonomyStatus)
+            : taxonomyStatus
+        );
+      }
+      setTaxonomyBaseline(cleaned);
+      if (updateReasons) {
+        setTaxonomyReasons(cleaned);
+      }
     } catch (error) {
       setTaxonomyError((error as Error).message ?? "Unable to save contact taxonomy.");
     } finally {
       setTaxonomySaving(false);
     }
-  }, [taxonomyReasons, taxonomyMeta, taxonomyStatus]);
+  }, [normalizeForSave, taxonomyReasons, taxonomyMeta, taxonomyStatus]);
+
+  const buildRowSaveReasons = useCallback(
+    (index: number) => {
+      if (!taxonomyBaseline || taxonomyBaseline.length !== taxonomyReasons.length) {
+        return taxonomyReasons;
+      }
+      return taxonomyBaseline.map((reason, idx) => (idx === index ? taxonomyReasons[idx] : reason));
+    },
+    [taxonomyBaseline, taxonomyReasons]
+  );
+
+  const buildRowChangeNote = useCallback(
+    (index: number) => {
+      const current = taxonomyReasons[index];
+      if (!current) return "Row update";
+      const previous = taxonomyBaseline?.[index];
+      const label = formatReasonLabel(current);
+      if (!previous) {
+        return `Row update: ${label} | added`;
+      }
+      const changes: string[] = [];
+      const prevTopic = (previous.topic ?? "").trim();
+      const nextTopic = (current.topic ?? "").trim();
+      if (prevTopic !== nextTopic) {
+        changes.push(`topic: "${prevTopic}" -> "${nextTopic}"`);
+      }
+      const prevSub = (previous.sub_reason ?? "").trim();
+      const nextSub = (current.sub_reason ?? "").trim();
+      if (prevSub !== nextSub) {
+        changes.push(`sub_reason: "${prevSub}" -> "${nextSub}"`);
+      }
+      const prevDesc = (previous.description ?? "").trim();
+      const nextDesc = (current.description ?? "").trim();
+      if (prevDesc !== nextDesc) {
+        changes.push(`description: "${prevDesc}" -> "${nextDesc}"`);
+      }
+      const prevKeywords = Array.isArray(previous.keywords) ? previous.keywords.join(", ") : "";
+      const nextKeywords = Array.isArray(current.keywords) ? current.keywords.join(", ") : "";
+      if (prevKeywords !== nextKeywords) {
+        changes.push(`keywords: "${prevKeywords}" -> "${nextKeywords}"`);
+      }
+      const prevStatus = previous.status ?? "IN_USE";
+      const nextStatus = current.status ?? "IN_USE";
+      if (prevStatus !== nextStatus) {
+        changes.push(`status: "${prevStatus}" -> "${nextStatus}"`);
+      }
+      if (!changes.length) {
+        return `Row save: ${label}`;
+      }
+      return `Row update: ${label} | ${changes.join("; ")}`;
+    },
+    [formatReasonLabel, taxonomyBaseline, taxonomyReasons]
+  );
+
+  const buildBulkChangeNote = useCallback(() => {
+    if (!taxonomyBaseline) {
+      return "Bulk update from settings UI";
+    }
+    const lines: string[] = [];
+    const maxRows = Math.max(taxonomyBaseline.length, taxonomyReasons.length);
+    for (let idx = 0; idx < maxRows; idx += 1) {
+      const previous = taxonomyBaseline[idx];
+      const current = taxonomyReasons[idx];
+      if (!previous && current) {
+        lines.push(`Row added: ${formatReasonLabel(current)}`);
+        continue;
+      }
+      if (previous && !current) {
+        lines.push(`Row removed: ${formatReasonLabel(previous)}`);
+        continue;
+      }
+      if (!previous || !current) continue;
+      const rowNote = buildRowChangeNote(idx);
+      if (rowNote && !rowNote.startsWith("Row save")) {
+        lines.push(rowNote);
+      }
+    }
+    if (!lines.length) {
+      return "Bulk update from settings UI";
+    }
+    return lines.join(" | ");
+  }, [buildRowChangeNote, formatReasonLabel, taxonomyBaseline, taxonomyReasons]);
+
+  const handleTaxonomySaveAll = useCallback(() => {
+    const notes = buildBulkChangeNote();
+    return handleTaxonomySave(undefined, notes);
+  }, [buildBulkChangeNote, handleTaxonomySave]);
+
+  const handleTaxonomySaveRow = useCallback(
+    (index: number) => {
+      const rowReasons = buildRowSaveReasons(index);
+      const notes = buildRowChangeNote(index);
+      return handleTaxonomySave(rowReasons, notes, false);
+    },
+    [buildRowChangeNote, buildRowSaveReasons, handleTaxonomySave]
+  );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -345,7 +469,7 @@ export default function SettingsPage() {
               </button>
               <button
                 type="button"
-                onClick={handleTaxonomySave}
+                onClick={handleTaxonomySaveAll}
                 disabled={taxonomySaving}
                 className="rounded-lg border border-brand-500/60 px-3 py-1 text-xs font-semibold text-brand-100 transition hover:bg-brand-500/10 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
               >
@@ -386,11 +510,21 @@ export default function SettingsPage() {
                     className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-2 py-1 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
                     placeholder="Optional sub-reason"
                   />
-                  <input
-                    type="text"
+                  <textarea
                     value={reason.description ?? ""}
                     onChange={(event) => handleReasonFieldChange(index, "description", event.target.value)}
-                    className="w-full rounded-lg border border-slate-700 bg-slate-950/70 px-2 py-1 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                    onInput={(event) => {
+                      const target = event.currentTarget;
+                      target.style.height = "auto";
+                      target.style.height = `${target.scrollHeight}px`;
+                    }}
+                    ref={(element) => {
+                      if (!element) return;
+                      element.style.height = "auto";
+                      element.style.height = `${element.scrollHeight}px`;
+                    }}
+                    rows={2}
+                    className="w-full min-h-[44px] resize-none rounded-lg border border-slate-700 bg-slate-950/70 px-2 py-1 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/30"
                     placeholder="When to use this reason"
                   />
                   <input
@@ -424,13 +558,23 @@ export default function SettingsPage() {
                     <option value="OBSOLETED">OBSOLETED</option>
                     <option value="CANCELLED">CANCELLED</option>
                   </select>
-                  <button
-                    type="button"
-                    onClick={() => handleTaxonomyRemoveRow(index)}
-                    className="rounded-lg border border-slate-700 px-2 py-1 text-xs font-semibold text-slate-300 transition hover:border-red-500 hover:text-red-200"
-                  >
-                    Remove
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleTaxonomySaveRow(index)}
+                      disabled={taxonomySaving || !(reason.topic ?? "").trim()}
+                      className="rounded-lg border border-slate-700 px-2 py-1 text-xs font-semibold text-slate-200 transition hover:border-brand-500 hover:text-brand-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleTaxonomyRemoveRow(index)}
+                      className="rounded-lg border border-slate-700 px-2 py-1 text-xs font-semibold text-slate-300 transition hover:border-red-500 hover:text-red-200"
+                    >
+                      Remove
+                    </button>
+                  </div>
                 </div>
               ))}
               {taxonomyLoading && (

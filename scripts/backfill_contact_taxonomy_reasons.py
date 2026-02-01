@@ -1,23 +1,14 @@
 #!/usr/bin/env python3
-"""Backfill contact_taxonomy_reasons rows from legacy labels/default taxonomy."""
+"""Backfill contact_taxonomy_reasons rows from legacy labels."""
 from __future__ import annotations
 
 import os
 import sys
-from importlib.machinery import SourceFileLoader
-from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Iterable, List
 
 from dotenv import load_dotenv
 from supabase import Client, create_client  # type: ignore
 
-try:
-    from analysis.default_taxonomy import AGENT_CONTACT_HEADINGS
-except Exception:
-    try:
-        from default_taxonomy import AGENT_CONTACT_HEADINGS  # type: ignore
-    except Exception:
-        AGENT_CONTACT_HEADINGS: Tuple[str, ...] = ()
 
 
 def parse_labels_to_reasons(labels: Iterable[str]) -> List[dict]:
@@ -62,23 +53,11 @@ def main() -> int:
     load_dotenv(override=False)
     client = ensure_client()
 
-    if not AGENT_CONTACT_HEADINGS:
-        module_path = Path(__file__).resolve().parent.parent / "analysis" / "default_taxonomy.py"
-        if module_path.exists():
-            try:
-                module = SourceFileLoader("contact_taxonomy_loader", str(module_path)).load_module()
-                headings = getattr(module, "AGENT_CONTACT_HEADINGS", ())
-                if headings:
-                    globals()["AGENT_CONTACT_HEADINGS"] = tuple(headings)  # type: ignore
-            except Exception as exc:  # pragma: no cover - defensive
-                print(f"[warn] Unable to load defaults from {module_path}: {exc}", file=sys.stderr)
-
     versions = fetch_versions(client)
     if not versions:
         print("No contact_taxonomy_versions found.", file=sys.stderr)
         return 0
 
-    defaults = AGENT_CONTACT_HEADINGS or ()
     backfilled = 0
     skipped = 0
 
@@ -106,8 +85,6 @@ def main() -> int:
         label_list: List[str] = []
         if isinstance(labels, list):
             label_list = [str(label).strip() for label in labels if str(label).strip()]
-        if not label_list and defaults:
-            label_list = list(defaults)
         if not label_list:
             print(f"[warn] No labels found for version {version_number}; skipping.", file=sys.stderr)
             continue
