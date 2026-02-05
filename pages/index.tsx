@@ -34,7 +34,7 @@ import {
   computeTopAgents,
   computeToxicCustomers,
   filterByWindow,
-  isDuplicateConversation,
+  isMisclassificationChange,
   normaliseRows
 } from "@/lib/metrics";
 import { DEFAULT_PROJECT_CONFIG, PROJECT_PROMPT_TYPES, PromptConfigType } from "@/lib/defaultProjectConfig";
@@ -1123,9 +1123,7 @@ export default function DashboardPage({
       if (!agentId) {
         return;
       }
-      const misclassifiedRows = filteredRows.filter(
-        (row) => row.contactReasonChange && !isDuplicateConversation(row)
-      );
+      const misclassifiedRows = filteredRows.filter((row) => isMisclassificationChange(row));
       if (!misclassifiedRows.length) {
         return;
       }

@@ -199,6 +199,58 @@ export function isDuplicateConversation(row: ConversationRow): boolean {
   return DUPLICATE_STATUS_VALUES.has(status) || DUPLICATE_STATUS_VALUES.has(resolution);
 }
 
+function isEbikeHardwareLabel(value: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+  return value === "ebike hardware issue";
+}
+
+function isUnknownToOtherTransition(
+  original: string | null,
+  corrected: string | null
+): boolean {
+  if (!original || !corrected) {
+    return false;
+  }
+  return (original === "issue unknown" || original === "unknown" || original === "unknow") && corrected === "other";
+}
+
+function isSubreasonOnlyChangeForEbikeHardware(
+  original: string | null,
+  corrected: string | null
+): boolean {
+  if (!original || !corrected) {
+    return false;
+  }
+  if (!isEbikeHardwareLabel(original)) {
+    return false;
+  }
+  return corrected.startsWith(`${original} - `);
+}
+
+export function isMisclassificationEligible(row: ConversationRow): boolean {
+  if (isDuplicateConversation(row)) {
+    return false;
+  }
+  const normalizedOriginal = normalizeReasonLabel(row.contactReasonOriginal);
+  const normalizedCorrected = normalizeReasonLabel(row.contactReason);
+  if (isUnknownToOtherTransition(normalizedOriginal, normalizedCorrected)) {
+    return false;
+  }
+  if (isSubreasonOnlyChangeForEbikeHardware(normalizedOriginal, normalizedCorrected)) {
+    return false;
+  }
+  return true;
+}
+
+export function isMisclassificationChange(row: ConversationRow): boolean {
+  if (!isMisclassificationEligible(row)) {
+    return false;
+  }
+  return row.contactReasonChange;
+}
+
 function aggregateContactReasonV2(rows: ConversationRow[]): ContactReasonV2Summary {
   const total = rows.length;
   const topicMap: Map<string, { count: number; subs: Map<string, number> }> = new Map();
@@ -815,7 +867,7 @@ export function computeAgentMatrix(
           agentScoreCount: 0
         };
 
-      const isDuplicate = isDuplicateConversation(row);
+      const misclassificationEligible = isMisclassificationEligible(row);
 
       if (typeof row.firstAgentResponseMinutes === "number") {
         bucket.firstResponseTotal += row.firstAgentResponseMinutes;
@@ -841,10 +893,10 @@ export function computeAgentMatrix(
       if (qualifies && owner && agentName === owner) {
         bucket.escalatedCount += 1;
       }
-      if (!isDuplicate) {
+      if (misclassificationEligible) {
         bucket.misclassifiedEligibleCount += 1;
       }
-      if (!isDuplicate && row.contactReasonChange && owner && agentName === owner) {
+      if (misclassificationEligible && row.contactReasonChange && owner && agentName === owner) {
         bucket.misclassifiedCount += 1;
       }
 

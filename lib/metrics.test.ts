@@ -309,6 +309,20 @@ describe("computeAgentMatrix", () => {
           resolution: "Duplicate"
         }),
         makeRow({
+          issueKey: "UNK-1",
+          agentList: ["Agent Matrix"],
+          contactReasonChange: true,
+          contactReasonOriginal: "Issue unknown",
+          contactReason: "Other"
+        }),
+        makeRow({
+          issueKey: "EBIKE-1",
+          agentList: ["Agent Matrix"],
+          contactReasonChange: true,
+          contactReasonOriginal: "Ebike hardware issue",
+          contactReason: "Ebike hardware issue - Wheel/Flat tire"
+        }),
+        makeRow({
           issueKey: "DUP-2",
           agentList: ["Agent Matrix"],
           contactReasonChange: true,

@@ -3,6 +3,7 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import Papa from "papaparse";
 
 import type { ProjectConfigEntry } from "@/types";
 
@@ -113,6 +114,14 @@ async function readLegacyCsv(filePath: string): Promise<string | null> {
   }
 }
 
+function parseCsv(csv: string): RoleEntry[] {
+  const parsed = Papa.parse(csv, { header: true, skipEmptyLines: true });
+  if (parsed.errors.length) {
+    return [];
+  }
+  return normaliseEntries(parsed.data);
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   const filePath = path.join(process.cwd(), "data", ROLE_FILENAME);
   const client = getSupabaseClient();
@@ -142,21 +151,33 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
 
+  const format = Array.isArray(req.query.format) ? req.query.format[0] : req.query.format;
+  const wantsJson = typeof format === "string" && format.toLowerCase() === "json";
+
   if (client) {
     const config = await fetchConfig(client);
     if (config?.payload && typeof config.payload === "object" && config.payload !== null) {
       const users = (config.payload as { users?: RoleEntry[] }).users ?? [];
-      const csv = toCsv(users);
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      res.status(200).send(csv);
+      if (wantsJson) {
+        res.status(200).json({ users });
+      } else {
+        const csv = toCsv(users);
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.status(200).send(csv);
+      }
       return;
     }
   }
 
   const legacy = await readLegacyCsv(filePath);
   if (legacy !== null) {
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.status(200).send(legacy);
+    if (wantsJson) {
+      const users = parseCsv(legacy);
+      res.status(200).json({ users });
+    } else {
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.status(200).send(legacy);
+    }
     return;
   }
 

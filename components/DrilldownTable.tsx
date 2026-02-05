@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import Papa from "papaparse";
 import clsx from "clsx";
 import { createPortal } from "react-dom";
@@ -710,6 +711,14 @@ export function DrilldownTable({
                   />
                 </button>
               </label>
+            )}
+            {reviewEnabled && (
+              <Link
+                href="/misclassification-analysis"
+                className="rounded-full border border-emerald-400/60 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"
+              >
+                Misclassification analysis
+              </Link>
             )}
             {downloadHref && (
               <a
