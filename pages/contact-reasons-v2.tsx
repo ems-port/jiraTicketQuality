@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 
 import { normaliseRows } from "@/lib/metrics";
+import { useDashboardStore } from "@/lib/useDashboardStore";
 import type { ConversationRow, TimeWindow } from "@/types";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -66,6 +67,16 @@ type HubRankingRow = {
 
 type HubSortKey = "count" | "normalizedToSales";
 type SortDirection = "asc" | "desc";
+
+type HubConcentratedIssue = {
+  key: string;
+  topic: string;
+  sub: string;
+  hub: string;
+  hubCount: number;
+  globalCount: number;
+  hubShare: number;
+};
 
 type HubReasonTrendRow = {
   key: string;
@@ -130,12 +141,27 @@ export default function ContactReasonsV2DrilldownPage() {
   const [hubSalesRows, setHubSalesRows] = useState<HubSalesTelemetryRow[]>([]);
   const [hubSalesWarning, setHubSalesWarning] = useState<string | null>(null);
   const [salesRefreshStatus, setSalesRefreshStatus] = useState<string | null>(null);
+  const sharedDashboardRows = useDashboardStore((state) => state.rows);
+  const initLoadStartedRef = useRef(false);
   const [hubSort, setHubSort] = useState<{ key: HubSortKey; direction: SortDirection }>({
     key: "count",
     direction: "desc"
   });
 
   useEffect(() => {
+    if (!rows.length && sharedDashboardRows.length) {
+      console.info(`[contact-reasons-v2] Reusing ${sharedDashboardRows.length} dashboard conversations from shared store.`);
+      setRows(sharedDashboardRows);
+      setReferenceNow(new Date());
+    }
+  }, [rows.length, sharedDashboardRows]);
+
+  useEffect(() => {
+    if (initLoadStartedRef.current) {
+      return;
+    }
+    initLoadStartedRef.current = true;
+
     let cancelled = false;
 
     const applyHubSalesPayload = (hubSalesPayload: Record<string, unknown>) => {
@@ -272,6 +298,14 @@ export default function ContactReasonsV2DrilldownPage() {
       setError(null);
       setHubSalesWarning(null);
       try {
+        if (sharedDashboardRows.length) {
+          console.info("[contact-reasons-v2] Using shared dashboard conversations; skipping initial API fetch.");
+          if (!cancelled) {
+            setRows(sharedDashboardRows);
+            setReferenceNow(new Date());
+          }
+          return;
+        }
         const maxLimit = Math.max(1, Number(process.env.NEXT_PUBLIC_CONVERSATION_FETCH_LIMIT ?? 5000));
         const pageSize = Math.max(1, Number(process.env.NEXT_PUBLIC_CONVERSATION_PAGE_SIZE ?? 200));
         let offset = 0;
@@ -321,7 +355,7 @@ export default function ContactReasonsV2DrilldownPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [sharedDashboardRows]);
 
   useEffect(() => {
     if (queryWindow && queryWindow !== selectedWindow) {
@@ -412,6 +446,53 @@ export default function ContactReasonsV2DrilldownPage() {
     return sortedHubRankingRows.slice(0, 10);
   }, [sortedHubRankingRows, hubSort.key]);
 
+  const topHubConcentratedIssues = useMemo<HubConcentratedIssue[]>(() => {
+    const concentrated: HubConcentratedIssue[] = [];
+    trendModel.reasonRows.forEach((reason) => {
+      if (reason.count <= 0) {
+        return;
+      }
+      let bestHub: string | null = null;
+      let bestHubCount = 0;
+      hubOptions.forEach((hub) => {
+        const hubReason = trendModel.hubReasonMap.get(makeHubReasonKey(hub, reason.key));
+        const hubCount = hubReason?.count ?? 0;
+        if (hubCount > bestHubCount) {
+          bestHubCount = hubCount;
+          bestHub = hub;
+        }
+      });
+      if (!bestHub || bestHubCount <= 0) {
+        return;
+      }
+      const hubShare = (bestHubCount / reason.count) * 100;
+      // Concentrated issues are dominated by one hub, but not strictly hub-only.
+      if (hubShare >= 60 && hubShare < 100) {
+        concentrated.push({
+          key: `${bestHub}@@${reason.key}`,
+          topic: reason.topic,
+          sub: reason.sub,
+          hub: bestHub,
+          hubCount: bestHubCount,
+          globalCount: reason.count,
+          hubShare
+        });
+      }
+    });
+
+    return concentrated
+      .sort((a, b) => {
+        if (b.hubCount !== a.hubCount) {
+          return b.hubCount - a.hubCount;
+        }
+        if (b.hubShare !== a.hubShare) {
+          return b.hubShare - a.hubShare;
+        }
+        return a.key.localeCompare(b.key);
+      })
+      .slice(0, 5);
+  }, [trendModel.reasonRows, trendModel.hubReasonMap, hubOptions]);
+
   useEffect(() => {
     if (!hubOptions.length) {
       if (selectedHub !== "") {
@@ -440,9 +521,6 @@ export default function ContactReasonsV2DrilldownPage() {
       .map((reason) => {
         const scoped = trendModel.hubReasonMap.get(makeHubReasonKey(selectedHub, reason.key));
         const hubCount = scoped?.count ?? 0;
-        if (hubCount <= 0) {
-          return null;
-        }
         const hubShare = reason.count > 0 ? (hubCount / reason.count) * 100 : 0;
         const scope: HubReasonTrendRow["scope"] =
           hubCount === reason.count ? "Hub only" : hubShare >= 60 ? "Hub concentrated" : "Global";
@@ -459,7 +537,6 @@ export default function ContactReasonsV2DrilldownPage() {
           globalDaily: [...reason.daily]
         };
       })
-      .filter((row): row is HubReasonTrendRow => Boolean(row))
       .sort((a, b) => {
         if (b.hubCount !== a.hubCount) {
           return b.hubCount - a.hubCount;
@@ -582,6 +659,37 @@ export default function ContactReasonsV2DrilldownPage() {
             />
           </div>
         </header>
+
+        {!loading && !error && topHubConcentratedIssues.length > 0 && (
+          <section className="rounded-3xl border border-amber-600/30 bg-amber-950/20 p-4 shadow-inner">
+            <header className="mb-3">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-amber-100">
+                Top Hub Concentrated Issues
+              </h2>
+              <p className="text-xs text-amber-200/80">
+                Top 5 concentrated issues in {WINDOW_LABELS[selectedWindow].toLowerCase()}.
+              </p>
+            </header>
+            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+              {topHubConcentratedIssues.map((issue) => (
+                <button
+                  key={issue.key}
+                  type="button"
+                  onClick={() => setSelectedHub(issue.hub)}
+                  className="rounded-xl border border-amber-500/30 bg-slate-900/60 p-3 text-left transition hover:border-amber-400/60 hover:bg-slate-900/80"
+                >
+                  <p className="truncate text-xs font-semibold text-amber-100">{issue.hub}</p>
+                  <p className="mt-1 line-clamp-2 text-xs text-slate-200">
+                    {issue.topic} · {issue.sub}
+                  </p>
+                  <p className="mt-2 text-[11px] text-slate-300">
+                    {issue.hubCount.toLocaleString()}/{issue.globalCount.toLocaleString()} · {issue.hubShare.toFixed(1)}%
+                  </p>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
 
         {loading && (
           <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 text-sm text-slate-300">
