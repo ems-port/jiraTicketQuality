@@ -30,6 +30,7 @@ const WINDOW_GRANULARITY: Record<TimeWindow, "hourly" | "daily"> = {
   "7d": "daily",
   "30d": "daily"
 };
+const HUB_INDICATOR_MIN_HITS = 3;
 
 type Bucket = {
   key: string;
@@ -76,6 +77,7 @@ type HubConcentratedIssue = {
   hubCount: number;
   globalCount: number;
   hubShare: number;
+  scope: "Hub concentrated" | "Hub only";
 };
 
 type HubReasonTrendRow = {
@@ -465,9 +467,12 @@ export default function ContactReasonsV2DrilldownPage() {
       if (!bestHub || bestHubCount <= 0) {
         return;
       }
+      if (bestHubCount < HUB_INDICATOR_MIN_HITS) {
+        return;
+      }
       const hubShare = (bestHubCount / reason.count) * 100;
-      // Concentrated issues are dominated by one hub, but not strictly hub-only.
-      if (hubShare >= 60 && hubShare < 100) {
+      if (hubShare >= 60) {
+        const scope: HubConcentratedIssue["scope"] = hubShare >= 100 ? "Hub only" : "Hub concentrated";
         concentrated.push({
           key: `${bestHub}@@${reason.key}`,
           topic: reason.topic,
@@ -475,12 +480,29 @@ export default function ContactReasonsV2DrilldownPage() {
           hub: bestHub,
           hubCount: bestHubCount,
           globalCount: reason.count,
-          hubShare
+          hubShare,
+          scope
         });
       }
     });
 
-    return concentrated
+    const deduped = new Map<string, HubConcentratedIssue>();
+    concentrated.forEach((issue) => {
+      const dedupeKey = `${normalizeHubKey(issue.hub)}@@${normalizeReasonGroupingKey(issue.topic, issue.sub)}`;
+      const existing = deduped.get(dedupeKey);
+      if (!existing) {
+        deduped.set(dedupeKey, issue);
+        return;
+      }
+      if (
+        issue.hubCount > existing.hubCount ||
+        (issue.hubCount === existing.hubCount && issue.hubShare > existing.hubShare)
+      ) {
+        deduped.set(dedupeKey, issue);
+      }
+    });
+
+    return Array.from(deduped.values())
       .sort((a, b) => {
         if (b.hubCount !== a.hubCount) {
           return b.hubCount - a.hubCount;
@@ -667,7 +689,7 @@ export default function ContactReasonsV2DrilldownPage() {
                 Top Hub Concentrated Issues
               </h2>
               <p className="text-xs text-amber-200/80">
-                Top 5 concentrated issues in {WINDOW_LABELS[selectedWindow].toLowerCase()}.
+                Top 5 hub concentrated or hub-only issues in {WINDOW_LABELS[selectedWindow].toLowerCase()}.
               </p>
             </header>
             <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
@@ -679,6 +701,7 @@ export default function ContactReasonsV2DrilldownPage() {
                   className="rounded-xl border border-amber-500/30 bg-slate-900/60 p-3 text-left transition hover:border-amber-400/60 hover:bg-slate-900/80"
                 >
                   <p className="truncate text-xs font-semibold text-amber-100">{issue.hub}</p>
+                  <p className="mt-1 text-[10px] uppercase tracking-wide text-amber-200/90">{issue.scope}</p>
                   <p className="mt-1 line-clamp-2 text-xs text-slate-200">
                     {issue.topic} · {issue.sub}
                   </p>
@@ -1030,6 +1053,9 @@ function buildTrendModel(rows: ConversationRow[], referenceNow: Date, window: Ti
       return;
     }
     const sub = resolveReasonSub(row);
+    if (isExcludedReason(topic, sub)) {
+      return;
+    }
     const referenceDate = row.endedAt ?? row.startedAt;
     if (!referenceDate) {
       return;
@@ -1046,6 +1072,9 @@ function buildTrendModel(rows: ConversationRow[], referenceNow: Date, window: Ti
 
     totalRows += 1;
     const hub = resolveHubLabel(row);
+    if (isExcludedHub(hub)) {
+      return;
+    }
     const reasonKey = makeReasonKey(topic, sub);
 
     if (!reasonMap.has(reasonKey)) {
@@ -1185,6 +1214,34 @@ function resolveReasonSub(row: ConversationRow): string {
   return normalized || "Unspecified";
 }
 
+function isExcludedReason(topic: string, sub: string): boolean {
+  const normalize = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "");
+  const topicKey = normalize(topic);
+  const subKey = normalize(sub);
+  const duplicateLike = (value: string) =>
+    value === "duplicate" ||
+    value.startsWith("duplicate") ||
+    value.includes("dupliacte") ||
+    value.includes("dupl");
+  return duplicateLike(topicKey) || duplicateLike(subKey);
+}
+
+function isExcludedHub(hub: string): boolean {
+  const hubKey = hub
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+  return (
+    hubKey === "noactivehub" ||
+    hubKey === "noactivepassother" ||
+    hubKey.startsWith("noactivepass")
+  );
+}
+
 function resolveHubLabel(row: ConversationRow): string {
   const value = row.hub;
   if (!value) {
@@ -1196,6 +1253,11 @@ function resolveHubLabel(row: ConversationRow): string {
 
 function normalizeHubKey(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function normalizeReasonGroupingKey(topic: string, sub: string): string {
+  const normalizePart = (value: string) => value.trim().toLowerCase().replace(/\s+/g, " ");
+  return `${normalizePart(topic)}::${normalizePart(sub)}`;
 }
 
 function normalizeHubBaseKey(value: string): string {
