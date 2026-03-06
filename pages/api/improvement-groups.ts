@@ -26,7 +26,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     try {
       const { data, error } = await supabase
         .from(TABLE)
-        .select("time_window_start,time_window_end,total_notes,unique_notes,model,payload,created_at")
+        .select("id,time_window_start,time_window_end,total_notes,unique_notes,model,payload,created_at")
         .order("time_window_end", { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -42,6 +42,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
       res.status(200).json({
         record: {
+          id: data.id,
           timeWindowStart: data.time_window_start,
           timeWindowEnd: data.time_window_end,
           totalNotes: data.total_notes,

@@ -2,7 +2,7 @@
   "version": 2,
   "crons": [
     {
-      "path": "/api/improvement-groups",
+      "path": "/api/cron/improvement-groups",
       "schedule": "0 4 * * *"
     }
   ]

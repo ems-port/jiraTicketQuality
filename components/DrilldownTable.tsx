@@ -13,6 +13,7 @@ import type { ReviewIdentity } from "@/lib/reviewIdentity";
 import {
   AgentRole,
   ConversationRow,
+  MisclassificationReviewNoteEntry,
   MisclassificationVerdict,
   MisclassificationReviewSummary
 } from "@/types";
@@ -281,7 +282,8 @@ export function DrilldownTable({
         customer_score: row.customerScore ?? "",
         customer_sentiment: row.sentiment,
         resolution_summary: row.resolutionWhy ?? "",
-        improvement_tip: row.improvementTip ?? ""
+        improvement_tip: row.improvementTip ?? "",
+        metrics_validation_notes: formatReviewNotesForCsv(reviewSummaries[row.issueKey]?.noteEntries ?? [])
       }))
     );
     const blob = new Blob([csv], { type: "text/csv" });
@@ -291,7 +293,7 @@ export function DrilldownTable({
     return () => {
       URL.revokeObjectURL(href);
     };
-  }, [open, sortedRows]);
+  }, [open, sortedRows, reviewSummaries]);
 
   useEffect(() => {
     if (!open || !reviewEnabled) {
@@ -613,22 +615,26 @@ export function DrilldownTable({
       label: "Review",
       sortable: false,
       sticky: "right",
+      cellClassName: () => "min-w-[20rem] max-w-[24rem]",
       render: (row) => {
         const summary = reviewSummaries[row.issueKey];
         return (
-          <div className="flex items-center gap-3">
-            <ReviewButton
-              verdict="up"
-              summary={summary}
-              disabled={reviewLoading}
-              onClick={() => handleReviewClick(row.issueKey, "up")}
-            />
-            <ReviewButton
-              verdict="down"
-              summary={summary}
-              disabled={reviewLoading}
-              onClick={() => handleReviewClick(row.issueKey, "down")}
-            />
+          <div className="space-y-2">
+            <div className="flex items-center gap-3">
+              <ReviewButton
+                verdict="up"
+                summary={summary}
+                disabled={reviewLoading}
+                onClick={() => handleReviewClick(row.issueKey, "up")}
+              />
+              <ReviewButton
+                verdict="down"
+                summary={summary}
+                disabled={reviewLoading}
+                onClick={() => handleReviewClick(row.issueKey, "down")}
+              />
+            </div>
+            <InlineReviewNotes notes={summary?.noteEntries ?? []} />
           </div>
         );
       }
@@ -910,6 +916,30 @@ function TruncatedText({ value, truncate = false }: { value: string; truncate?: 
   );
 }
 
+function InlineReviewNotes({ notes }: { notes: MisclassificationReviewNoteEntry[] }) {
+  if (!notes.length) {
+    return null;
+  }
+
+  return (
+    <div className="max-h-20 space-y-1 overflow-auto pr-1">
+      {notes.map((note, index) => {
+        const timestamp = note.updatedAt ?? note.createdAt;
+        const author = note.userDisplayName?.trim() || note.userId || "Reviewer";
+        return (
+          <p
+            key={`${note.userId}-${timestamp || index}-${note.notes.slice(0, 24)}`}
+            className="truncate text-[11px] text-slate-400"
+            title={`${author}: ${note.notes}${timestamp ? ` (${formatDateTimeLocal(new Date(timestamp))})` : ""}`}
+          >
+            <span className="font-medium text-slate-300">{author}</span>: {note.notes}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 function sentimentBadgeClass(label: string): string {
   return SENTIMENT_COLORS[label] ?? "text-slate-200 bg-slate-600/20 border-slate-500/40";
 }
@@ -967,6 +997,19 @@ async function requestReviewSummaries(issueKeys: string[], userId?: string | nul
   }
   const payload = (await response.json()) as ReviewSummariesResponse;
   return payload.summaries ?? {};
+}
+
+function formatReviewNotesForCsv(notes: MisclassificationReviewNoteEntry[]): string {
+  if (!notes.length) {
+    return "";
+  }
+  return notes
+    .map((note) => {
+      const timestamp = note.updatedAt ?? note.createdAt ?? "";
+      const author = note.userDisplayName?.trim() || note.userId || "Reviewer";
+      return `[${timestamp}] ${author}: ${note.notes}`;
+    })
+    .join(" | ");
 }
 
 function getBrowserFingerprint(): string | null {

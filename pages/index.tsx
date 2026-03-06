@@ -17,6 +17,7 @@ import { KPICard } from "@/components/KPICard";
 import { ManagerReviewPanel } from "@/components/ManagerReviewPanel";
 import { ImprovementGroupsPanel } from "@/components/ImprovementGroupsPanel";
 import { ImprovementGroupsDrilldown } from "@/components/ImprovementGroupsDrilldown";
+import { ImprovementTopicTrendsPanel } from "@/components/ImprovementTopicTrendsPanel";
 import { TicketVolumePanel } from "@/components/TicketVolumePanel";
 import { ToxicityList } from "@/components/ToxicityList";
 import { resolveDisplayName } from "@/lib/displayNames";
@@ -49,6 +50,7 @@ import type {
   ConversationRow,
   EscalationMetricKind,
   EscalationSeriesEntry,
+  ImprovementTopicTrendEntry,
   MetricSeries,
   TimeWindow
 } from "@/types";
@@ -59,10 +61,12 @@ function normalizeGroupingPayload(raw: any): ImprovementGroupingPayload | null {
     return null;
   }
   const groupsRaw = Array.isArray(raw.groups) ? raw.groups : [];
-  const groups = groupsRaw.map((group: any) => {
+  const groups = groupsRaw.map((group: any, index: number) => {
     const metricsRaw = group.metrics || {};
+    const fallbackGroupId = `group_${index + 1}`;
+    const normalizedGroupId = (group.group_id ?? group.groupId ?? "").toString().trim() || fallbackGroupId;
     return {
-      groupId: group.group_id ?? group.groupId ?? "",
+      groupId: normalizedGroupId,
       title: group.title ?? "",
       description: group.description ?? "",
       tip: group.tip ?? "",
@@ -226,6 +230,10 @@ export default function DashboardPage({
   const [selectedImprovementGroupId, setSelectedImprovementGroupId] = useState<string | null>(null);
   const [improvementRefreshRunning, setImprovementRefreshRunning] = useState(false);
   const [improvementRefreshStatus, setImprovementRefreshStatus] = useState<string | null>(null);
+  const [improvementTrends, setImprovementTrends] = useState<ImprovementTopicTrendEntry[]>([]);
+  const [improvementTrendsWindowDays, setImprovementTrendsWindowDays] = useState(30);
+  const [improvementTrendsLoading, setImprovementTrendsLoading] = useState(false);
+  const [improvementTrendsError, setImprovementTrendsError] = useState<string | null>(null);
   const [isManagerReviewOpen, setIsManagerReviewOpen] = useState(false);
   const [useOnlineData, setUseOnlineData] = useState(true);
   const [refreshState, setRefreshState] = useState<RefreshJobState>(DEFAULT_REFRESH_STATE);
@@ -418,6 +426,7 @@ export default function DashboardPage({
       if (payload?.record) {
         const normalizedPayload = normalizeGroupingPayload(payload.record.payload);
         setImprovementGroupingRecord({
+          id: payload.record.id ?? "",
           timeWindowStart: payload.record.timeWindowStart,
           timeWindowEnd: payload.record.timeWindowEnd,
           totalNotes: payload.record.totalNotes,
@@ -443,6 +452,43 @@ export default function DashboardPage({
     }
   }, []);
 
+  const loadImprovementTrends = useCallback(async () => {
+    setImprovementTrendsLoading(true);
+    setImprovementTrendsError(null);
+    try {
+      const response = await fetch("/api/improvement-group-trends?days=30&limit=9");
+      if (!response.ok) {
+        throw new Error(`Failed to load improvement trends (${response.status})`);
+      }
+      const payload = await response.json();
+      const rowsRaw = Array.isArray(payload?.entries) ? payload.entries : [];
+      const rows = rowsRaw
+        .filter((entry: any) => entry && typeof entry === "object")
+        .map((entry: any) => ({
+          topicKey: String(entry.topicKey ?? ""),
+          title: String(entry.title ?? "Untitled topic"),
+          totalCount: Number(entry.totalCount ?? 0),
+          delta7d: Number(entry.delta7d ?? 0),
+          upCount: Number(entry.upCount ?? 0),
+          downCount: Number(entry.downCount ?? 0),
+          positiveRate: entry.positiveRate == null ? null : Number(entry.positiveRate ?? 0),
+          series: Array.isArray(entry.series)
+            ? entry.series.map((point: any) => ({
+                date: String(point?.date ?? ""),
+                count: Number(point?.count ?? 0)
+              }))
+            : []
+        }))
+        .filter((entry: ImprovementTopicTrendEntry) => Boolean(entry.topicKey));
+      setImprovementTrends(rows);
+      setImprovementTrendsWindowDays(Number(payload?.windowDays ?? 30) || 30);
+    } catch (error) {
+      setImprovementTrendsError((error as Error).message ?? "Unable to load improvement trends.");
+    } finally {
+      setImprovementTrendsLoading(false);
+    }
+  }, []);
+
   const refreshImprovementGrouping = useCallback(async () => {
     setImprovementRefreshRunning(true);
     setImprovementRefreshStatus(null);
@@ -463,8 +509,9 @@ export default function DashboardPage({
     } finally {
       setImprovementRefreshRunning(false);
       void loadImprovementGrouping();
+      void loadImprovementTrends();
     }
-  }, [loadImprovementGrouping]);
+  }, [loadImprovementGrouping, loadImprovementTrends]);
 
   useEffect(() => {
     if (!rows.length && !initialLoadAttemptedRef.current && !useOnlineData) {
@@ -482,6 +529,10 @@ export default function DashboardPage({
   useEffect(() => {
     void loadImprovementGrouping();
   }, [loadImprovementGrouping, useOnlineData]);
+
+  useEffect(() => {
+    void loadImprovementTrends();
+  }, [loadImprovementTrends]);
 
   const fetchRefreshStatus = useCallback(async () => {
     try {
@@ -1446,6 +1497,13 @@ export default function DashboardPage({
               }}
             />
 
+            <ImprovementTopicTrendsPanel
+              entries={improvementTrends}
+              windowDays={improvementTrendsWindowDays}
+              loading={improvementTrendsLoading}
+              error={improvementTrendsError}
+            />
+
             <section className="grid gap-4 lg:grid-cols-3">
               <div className="lg:col-span-1">
                 <AgentRankList
@@ -1553,6 +1611,7 @@ export default function DashboardPage({
       <ImprovementGroupsDrilldown
         open={improvementDrilldownOpen}
         grouping={improvementGroupingRecord?.payload ?? null}
+        groupingId={improvementGroupingRecord?.id ?? null}
         onClose={() => setImprovementDrilldownOpen(false)}
         issueAgents={issueAgents}
         mapping={idMapping}

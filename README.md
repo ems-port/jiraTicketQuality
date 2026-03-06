@@ -146,10 +146,13 @@ with the following scheduling workflow:
 1. Set `REFRESH_CRON_SECRET` in the Vercel project (a random string). Requests to
    `/api/cron/refresh` must include `Authorization: Bearer <secret>` or
    `x-cron-secret: <secret>`; local testing can also pass `?token=<secret>`.
-2. Keep `vercel.cron.json` committed so every deployment automatically registers a cron entry
-   that hits `/api/cron/refresh` every 30 minutes. Adjust the `schedule` field to any
+2. Keep `vercel.json` committed so every deployment automatically registers cron entries.
+   Use `/api/cron/refresh` for the ingest/process pipeline, and `/api/cron/improvement-groups`
+   for the LLM "tips/problems" summary job. Do not target `GET /api/improvement-groups` in cron,
+   because that endpoint only reads the latest stored grouping and does not execute the job.
+3. Adjust each cron `schedule` field to any
    valid Cron expression such as `"*/15 * * * *"` for a 15-minute cadence.
-3. In the Vercel dashboard, confirm that the cron job exists for the branch you need.
+4. In the Vercel dashboard, confirm that each cron job exists for the branch you need.
    If you want to run against production, ensure the cron job is linked to the `production`
    deployment. Cron jobs are available on all plans, but double-check on Hobby projects
    whether the job targets preview or production—historically only preview deploys were
@@ -158,6 +161,25 @@ with the following scheduling workflow:
 When the cron invocation starts the job it returns immediately with the current job state.
 The serverless function streams Python logs to Vercel’s function logs, so failed runs can
 be debugged without re-deploying.
+
+## Improvement point feedback and trends
+
+Improvement grouping is now stored in two layers:
+
+1. `improvement_tip_groupings`: raw snapshot metadata + original JSON payload.
+2. `improvement_tip_group_items`: one row per grouped improvement point (topic key, title, metrics, key IDs, next steps).
+
+Metrics Validation (LLM feedback usefulness) is stored in:
+
+- `improvement_tip_group_feedback`: one row per `(grouping_id, group_id, user_id)` with `verdict` (`up`/`down`) and optional notes.
+
+API routes:
+
+- `GET /api/improvement-group-feedback?groupingId=<id>&groupIds=a,b,c&userId=<id>`
+- `POST /api/improvement-group-feedback`
+- `GET /api/improvement-group-trends?days=30&limit=9`
+
+To enable these tables/endpoints, apply the latest `supabase/schema.sql`.
 
 ## Hub telemetry sync endpoint
 

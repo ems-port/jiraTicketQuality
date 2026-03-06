@@ -133,6 +133,15 @@ export interface ConversationRow {
 
 export type MisclassificationVerdict = "up" | "down";
 
+export interface MisclassificationReviewNoteEntry {
+  verdict: MisclassificationVerdict;
+  notes: string;
+  userId: string;
+  userDisplayName: string | null;
+  updatedAt: string | null;
+  createdAt: string | null;
+}
+
 export interface MisclassificationReviewSummary {
   issueKey: string;
   upCount: number;
@@ -143,6 +152,7 @@ export interface MisclassificationReviewSummary {
   userVerdict: MisclassificationVerdict | null;
   userNotes: string | null;
   userDisplayName: string | null;
+  noteEntries: MisclassificationReviewNoteEntry[];
 }
 
 export interface MetricSeries {
@@ -244,6 +254,7 @@ export interface ImprovementGroupingPayload {
 }
 
 export interface ImprovementGroupingRecord {
+  id: string;
   timeWindowStart: string;
   timeWindowEnd: string;
   totalNotes: number;
@@ -251,6 +262,60 @@ export interface ImprovementGroupingRecord {
   model?: string | null;
   payload: ImprovementGroupingPayload;
   createdAt: string;
+}
+
+export type ImprovementFeedbackVerdict = "up" | "down";
+
+export interface ImprovementGroupFeedbackSummary {
+  groupId: string;
+  upCount: number;
+  downCount: number;
+  entries: number;
+  userVerdict: ImprovementFeedbackVerdict | null;
+  userNotes: string | null;
+  userDisplayName: string | null;
+  lastUpdatedAt: string | null;
+  lastUpdatedBy: string | null;
+}
+
+export interface ImprovementGroupFeedbackEntry {
+  groupId: string;
+  verdict: ImprovementFeedbackVerdict;
+  notes: string;
+  userId: string;
+  userDisplayName: string | null;
+  updatedAt: string | null;
+  createdAt: string | null;
+}
+
+export interface MetricsValidationIssueNote {
+  issueKey: string;
+  groupingId: string;
+  groupId: string;
+  topicKey: string;
+  groupTitle: string;
+  verdict: ImprovementFeedbackVerdict;
+  notes: string;
+  userId: string;
+  userDisplayName: string | null;
+  updatedAt: string | null;
+  createdAt: string | null;
+}
+
+export interface ImprovementTopicTrendPoint {
+  date: string;
+  count: number;
+}
+
+export interface ImprovementTopicTrendEntry {
+  topicKey: string;
+  title: string;
+  totalCount: number;
+  delta7d: number;
+  upCount: number;
+  downCount: number;
+  positiveRate: number | null;
+  series: ImprovementTopicTrendPoint[];
 }
 
 export interface ContactReasonSparkPoint {

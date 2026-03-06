@@ -1,7 +1,11 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-import type { MisclassificationVerdict, MisclassificationReviewSummary } from "@/types";
+import type {
+  MisclassificationReviewNoteEntry,
+  MisclassificationReviewSummary,
+  MisclassificationVerdict
+} from "@/types";
 
 type ReviewRow = {
   issue_key: string;
@@ -176,7 +180,8 @@ function buildSummaryMap(
     lastUpdatedBy: null,
     userVerdict: null,
     userNotes: null,
-    userDisplayName: null
+    userDisplayName: null,
+    noteEntries: []
   });
 
   const summary: Record<string, MisclassificationReviewSummary> = {};
@@ -195,6 +200,18 @@ function buildSummaryMap(
       target.upCount += 1;
     } else if (row.verdict === "down") {
       target.downCount += 1;
+    }
+
+    const note = typeof row.notes === "string" ? row.notes.trim() : "";
+    if (note.length > 0) {
+      target.noteEntries.push({
+        verdict: row.verdict,
+        notes: note,
+        userId: row.user_id,
+        userDisplayName: row.user_display ?? null,
+        updatedAt: row.updated_at,
+        createdAt: row.created_at
+      } satisfies MisclassificationReviewNoteEntry);
     }
 
     const updatedAt = row.updated_at ?? row.created_at ?? null;

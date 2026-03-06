@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -106,6 +107,26 @@ def ensure_supabase_client(
     return create_client(resolved_url, resolved_key)
 
 
+def _parse_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _parse_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def to_topic_key(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
+    normalized = normalized.strip("_")
+    return normalized or "uncategorized"
+
+
 def persist_grouping_payload(
     client: Any,
     payload: Dict[str, Any],
@@ -115,7 +136,7 @@ def persist_grouping_payload(
     total_notes: int,
     unique_notes: int,
     table: str = "improvement_tip_groupings",
-) -> bool:
+) -> Optional[str]:
     record = {
         "time_window_start": window_start.isoformat(),
         "time_window_end": window_end.isoformat(),
@@ -128,14 +149,72 @@ def persist_grouping_payload(
         response = client.table(table).insert(record).execute()
     except Exception as exc:  # pragma: no cover - defensive
         print(f"[error] Failed to persist grouping payload: {exc}", file=sys.stderr)
-        return False
+        return None
     rows = getattr(response, "data", None)
+    inserted_id: Optional[str] = None
     if isinstance(rows, list) and rows:
         inserted = rows[0]
         inserted_id = inserted.get("id") if isinstance(inserted, dict) else None
         print(f"Saved grouping to Supabase table '{table}' (id={inserted_id}).")
     else:
         print(f"Saved grouping to Supabase table '{table}'.")
+    return inserted_id
+
+
+def persist_group_items(
+    client: Any,
+    grouping_id: str,
+    payload: Dict[str, Any],
+    table: str = "improvement_tip_group_items",
+) -> bool:
+    raw_groups = payload.get("groups")
+    groups = raw_groups if isinstance(raw_groups, list) else []
+    records: List[Dict[str, Any]] = []
+    for index, raw_group in enumerate(groups):
+        if not isinstance(raw_group, dict):
+            continue
+        metrics = raw_group.get("metrics") if isinstance(raw_group.get("metrics"), dict) else {}
+        key_ids_raw = raw_group.get("key_ids")
+        if not isinstance(key_ids_raw, list):
+            key_ids_raw = raw_group.get("keyIds") if isinstance(raw_group.get("keyIds"), list) else []
+        key_ids = [str(item).strip() for item in key_ids_raw if str(item).strip()]
+        group_id = str(raw_group.get("group_id") or raw_group.get("groupId") or f"group_{index + 1}").strip()
+        title = str(raw_group.get("title") or group_id).strip()
+        topic_source = str(raw_group.get("group_id") or raw_group.get("groupId") or title).strip()
+        topic_key = to_topic_key(topic_source)
+        next_steps = raw_group.get("next_steps")
+        if not isinstance(next_steps, list):
+            next_steps = raw_group.get("nextSteps") if isinstance(raw_group.get("nextSteps"), list) else []
+
+        records.append(
+            {
+                "grouping_id": grouping_id,
+                "group_id": group_id,
+                "topic_key": topic_key,
+                "title": title or group_id,
+                "description": str(raw_group.get("description") or "").strip() or None,
+                "tip": str(raw_group.get("tip") or "").strip() or None,
+                "key_ids": key_ids,
+                "next_steps": next_steps,
+                "group_size": _parse_int(metrics.get("group_size") or metrics.get("groupSize"), len(key_ids)),
+                "coverage_pct": _parse_float(metrics.get("coverage_pct") or metrics.get("coveragePct"), 0.0),
+                "actionability_score": _parse_int(metrics.get("actionability_score") or metrics.get("actionabilityScore"), 0),
+                "severity_score": _parse_int(metrics.get("severity_score") or metrics.get("severityScore"), 0),
+                "overall_score": _parse_int(metrics.get("overall_score") or metrics.get("overallScore"), 0),
+                "rank_index": index,
+            }
+        )
+
+    if not records:
+        return True
+
+    try:
+        client.table(table).upsert(records, on_conflict="grouping_id,group_id").execute()
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[warn] Failed to persist normalized group rows: {exc}", file=sys.stderr)
+        return False
+
+    print(f"Saved {len(records)} normalized rows to Supabase table '{table}'.")
     return True
 
 
@@ -593,7 +672,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("Parsed response keys:", list(parsed.keys()))
 
             if args.persist:
-                persisted = persist_grouping_payload(
+                grouping_id = persist_grouping_payload(
                     client=supabase_client,
                     payload=parsed,
                     model=args.model,
@@ -602,8 +681,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     total_notes=len(tips),
                     unique_notes=unique_notes,
                 )
-                if not persisted:
+                if not grouping_id:
                     print("[warn] Failed to persist grouping payload to Supabase.", file=sys.stderr)
+                else:
+                    persist_group_items(
+                        client=supabase_client,
+                        grouping_id=grouping_id,
+                        payload=parsed,
+                    )
         except json.JSONDecodeError as exc:
             print(f"[warn] Failed to parse JSON: {exc}", file=sys.stderr)
     else:

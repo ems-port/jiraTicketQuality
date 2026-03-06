@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import type { ContactReasonV2Summary, ConversationRow } from "@/types";
@@ -33,9 +34,17 @@ export function ContactReasonV2Panel({ summary, window, rows }: Props) {
           <h2 className="text-xl font-semibold text-white">Top 10 Contact Reasons V2</h2>
           <p className="text-xs text-slate-400">{windowLabel}</p>
         </div>
-        <span className="rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
-          {summary.total.toLocaleString()} ticket{summary.total === 1 ? "" : "s"} in view
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-slate-800 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
+            {summary.total.toLocaleString()} ticket{summary.total === 1 ? "" : "s"} in view
+          </span>
+          <Link
+            href="/contact-reasons-v2"
+            className="rounded-full border border-brand-500/40 bg-brand-500/10 px-3 py-1 text-xs font-semibold text-brand-100 transition hover:border-brand-400 hover:bg-brand-500/20 hover:text-brand-50"
+          >
+            View drilldown
+          </Link>
+        </div>
       </header>
 
       <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
@@ -116,4 +125,3 @@ export function ContactReasonV2Panel({ summary, window, rows }: Props) {
     </section>
   );
 }
-import Link from "next/link";
