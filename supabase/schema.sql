@@ -249,3 +249,4 @@ create index if not exists idx_improvement_tip_group_feedback_group
     on public.improvement_tip_group_feedback (grouping_id, group_id);
 create index if not exists idx_improvement_tip_group_feedback_user
     on public.improvement_tip_group_feedback (user_id);
+hub_telematry_latest

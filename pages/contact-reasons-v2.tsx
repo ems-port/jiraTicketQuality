@@ -4,10 +4,31 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 
 import { normaliseRows } from "@/lib/metrics";
-import type { ConversationRow } from "@/types";
+import type { ConversationRow, TimeWindow } from "@/types";
 
+const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const TREND_DAY_COUNT = 7;
+const WINDOW_OPTIONS: TimeWindow[] = ["24h", "7d", "30d"];
+const WINDOW_LABELS: Record<TimeWindow, string> = {
+  "24h": "Last 24 hours",
+  "7d": "Last 7 days",
+  "30d": "Last 30 days"
+};
+const WINDOW_DURATION_MS: Record<TimeWindow, number> = {
+  "24h": 24 * HOUR_MS,
+  "7d": 7 * DAY_MS,
+  "30d": 30 * DAY_MS
+};
+const WINDOW_BUCKET_COUNT: Record<TimeWindow, number> = {
+  "24h": 24,
+  "7d": 7,
+  "30d": 30
+};
+const WINDOW_GRANULARITY: Record<TimeWindow, "hourly" | "daily"> = {
+  "24h": "hourly",
+  "7d": "daily",
+  "30d": "daily"
+};
 
 type Bucket = {
   key: string;
@@ -34,6 +55,18 @@ type HubTrendRow = {
   daily: number[];
 };
 
+type HubRankingRow = {
+  hub: string;
+  count: number;
+  share: number;
+  sales: number | null;
+  normalizedToSales: number | null;
+  daily: number[];
+};
+
+type HubSortKey = "count" | "normalizedToSales";
+type SortDirection = "asc" | "desc";
+
 type HubReasonTrendRow = {
   key: string;
   topic: string;
@@ -54,8 +87,29 @@ type TrendModel = {
   totalRows: number;
 };
 
+type HubSalesTelemetryRow = {
+  hubName: string;
+  passSoldCount: number;
+  subscriptionsSoldCount: number;
+  totalSales: number;
+};
+
+type HubSalesFallbackEntry = {
+  totalSales: number;
+  rowCount: number;
+  hasGen4: boolean;
+  hasGen5: boolean;
+};
+
 export default function ContactReasonsV2DrilldownPage() {
   const router = useRouter();
+  const queryWindow = useMemo<TimeWindow | null>(() => {
+    const raw = router.query.window;
+    if (raw === "24h" || raw === "7d" || raw === "30d") {
+      return raw;
+    }
+    return null;
+  }, [router.query.window]);
   const queryHub = useMemo(() => {
     const hub = router.query.hub;
     if (typeof hub === "string" && hub.trim()) {
@@ -71,36 +125,292 @@ export default function ContactReasonsV2DrilldownPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [referenceNow, setReferenceNow] = useState(() => new Date());
+  const [selectedWindow, setSelectedWindow] = useState<TimeWindow>(queryWindow ?? "7d");
   const [selectedHub, setSelectedHub] = useState("");
+  const [hubSalesRows, setHubSalesRows] = useState<HubSalesTelemetryRow[]>([]);
+  const [hubSalesWarning, setHubSalesWarning] = useState<string | null>(null);
+  const [salesRefreshStatus, setSalesRefreshStatus] = useState<string | null>(null);
+  const [hubSort, setHubSort] = useState<{ key: HubSortKey; direction: SortDirection }>({
+    key: "count",
+    direction: "desc"
+  });
 
   useEffect(() => {
+    let cancelled = false;
+
+    const applyHubSalesPayload = (hubSalesPayload: Record<string, unknown>) => {
+      const telemetryRows = Array.isArray(hubSalesPayload.rows) ? hubSalesPayload.rows : [];
+      setHubSalesRows(
+        telemetryRows.map((row: Record<string, unknown>) => ({
+          hubName: String(row.hubName ?? ""),
+          passSoldCount: toFiniteNumber(row.passSoldCount),
+          subscriptionsSoldCount: toFiniteNumber(row.subscriptionsSoldCount),
+          totalSales: toFiniteNumber(row.totalSales)
+        }))
+      );
+      setHubSalesWarning(typeof hubSalesPayload.warning === "string" ? hubSalesPayload.warning : null);
+    };
+
+    const loadLatestHubSales = async () => {
+      const hubSalesResponse = await fetch("/api/hub-telemetry/latest");
+      if (hubSalesResponse.ok) {
+        const hubSalesPayload = (await hubSalesResponse.json()) as Record<string, unknown>;
+        if (!cancelled) {
+          applyHubSalesPayload(hubSalesPayload);
+        }
+      } else if (!cancelled) {
+        setHubSalesRows([]);
+        setHubSalesWarning(`Hub sales normalization unavailable (${hubSalesResponse.status}).`);
+      }
+    };
+
+    const refreshHubSales = async () => {
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const requestSalesRefresh = async (): Promise<{
+        ok: boolean;
+        status: string;
+        message: string;
+        responseStatus: number;
+        payload: Record<string, unknown>;
+      }> => {
+        const refreshResponse = await fetch("/api/hub-telemetry/refresh-for-drilldown", {
+          method: "POST"
+        });
+        let refreshPayload: Record<string, unknown> = {};
+        try {
+          refreshPayload = (await refreshResponse.json()) as Record<string, unknown>;
+        } catch {
+          refreshPayload = {};
+        }
+        const status = String(refreshPayload.status ?? "");
+        const message =
+          typeof refreshPayload.message === "string"
+            ? refreshPayload.message
+            : refreshResponse.ok
+              ? "Sales refresh completed."
+              : `Refresh failed (${refreshResponse.status}).`;
+        return {
+          ok: refreshResponse.ok && refreshPayload.ok === true,
+          status,
+          message,
+          responseStatus: refreshResponse.status,
+          payload: refreshPayload
+        };
+      };
+
+      setSalesRefreshStatus("Refreshing sales from ThingsBoard...");
+      console.info("[contact-reasons-v2] Starting sales refresh for drilldown view.");
+      try {
+        const maxPollAttempts = 6;
+        let pollAttempt = 0;
+        let lastInProgressMessage = "Sales refresh already running.";
+        while (!cancelled) {
+          const refreshResult = await requestSalesRefresh();
+          if (!refreshResult.ok) {
+            const message =
+              typeof refreshResult.payload.error === "string"
+                ? String(refreshResult.payload.error)
+                : `Refresh failed (${refreshResult.responseStatus}).`;
+            console.warn("[contact-reasons-v2] Sales refresh failed:", message);
+            if (!cancelled) {
+              setSalesRefreshStatus(`Sales refresh failed: ${message}`);
+            }
+            break;
+          }
+
+          if (refreshResult.status === "in_progress") {
+            lastInProgressMessage = refreshResult.message;
+            pollAttempt += 1;
+            console.info(`[contact-reasons-v2] Sales refresh in progress (poll ${pollAttempt}/${maxPollAttempts}).`);
+            if (!cancelled) {
+              setSalesRefreshStatus(`${refreshResult.message} Waiting for completion...`);
+            }
+            if (pollAttempt >= maxPollAttempts) {
+              if (!cancelled) {
+                setSalesRefreshStatus(`${lastInProgressMessage} Showing latest available sales snapshot.`);
+              }
+              break;
+            }
+            await sleep(2500);
+            continue;
+          }
+
+          if (refreshResult.status === "refreshed") {
+            console.info("[contact-reasons-v2] Sales refresh complete:", refreshResult.payload);
+          } else if (refreshResult.status === "skipped") {
+            console.info("[contact-reasons-v2] Sales refresh skipped (cooldown):", refreshResult.payload);
+          } else {
+            console.info("[contact-reasons-v2] Sales refresh response:", refreshResult.payload);
+          }
+
+          if (!cancelled) {
+            setSalesRefreshStatus(refreshResult.message);
+          }
+          break;
+        }
+      } catch (error) {
+        const message = (error as Error).message ?? "Unknown refresh error.";
+        console.error("[contact-reasons-v2] Sales refresh exception:", message);
+        if (!cancelled) {
+          setSalesRefreshStatus(`Sales refresh failed: ${message}`);
+        }
+      } finally {
+        try {
+          await loadLatestHubSales();
+        } catch (error) {
+          const message = (error as Error).message ?? "Unable to load latest sales.";
+          console.error("[contact-reasons-v2] Failed to load latest sales after refresh:", message);
+          if (!cancelled) {
+            setHubSalesWarning(message);
+          }
+        }
+      }
+    };
+
     const loadConversations = async () => {
       setLoading(true);
       setError(null);
+      setHubSalesWarning(null);
       try {
-        const response = await fetch("/api/conversations");
-        if (!response.ok) {
-          throw new Error(`Failed to load conversations (${response.status})`);
+        const maxLimit = Math.max(1, Number(process.env.NEXT_PUBLIC_CONVERSATION_FETCH_LIMIT ?? 5000));
+        const pageSize = Math.max(1, Number(process.env.NEXT_PUBLIC_CONVERSATION_PAGE_SIZE ?? 200));
+        let offset = 0;
+        const collected: Record<string, unknown>[] = [];
+
+        while (collected.length < maxLimit) {
+          const remaining = maxLimit - collected.length;
+          const page = Math.min(pageSize, remaining);
+          const conversationsResponse = await fetch(
+            `/api/conversations?offset=${offset}&limit=${maxLimit}&pageSize=${page}`
+          );
+          if (!conversationsResponse.ok) {
+            throw new Error(`Failed to load conversations (${conversationsResponse.status})`);
+          }
+          const payload = await conversationsResponse.json();
+          const batch: Record<string, unknown>[] = Array.isArray(payload.rows) ? payload.rows : [];
+          collected.push(...batch);
+          const nextOffset = typeof payload.nextOffset === "number" ? payload.nextOffset : null;
+          if (!nextOffset || !batch.length) {
+            break;
+          }
+          offset = nextOffset;
         }
-        const payload = await response.json();
-        const rawRows: Record<string, unknown>[] = Array.isArray(payload.rows) ? payload.rows : [];
-        setRows(normaliseRows(rawRows as Record<string, string | number | boolean | null>[]));
-        setReferenceNow(new Date());
+
+        if (!collected.length) {
+          throw new Error("No conversations returned from API.");
+        }
+
+        console.info(`[contact-reasons-v2] Loaded ${collected.length} conversations across paginated API calls.`);
+        if (!cancelled) {
+          setRows(normaliseRows(collected as Record<string, string | number | boolean | null>[]));
+          setReferenceNow(new Date());
+        }
       } catch (err) {
-        setError((err as Error).message ?? "Unable to load conversations.");
+        if (!cancelled) {
+          setError((err as Error).message ?? "Unable to load conversations.");
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     };
 
     void loadConversations();
+    void refreshHubSales();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const trendModel = useMemo(() => buildTrendModel(rows, referenceNow), [rows, referenceNow]);
+  useEffect(() => {
+    if (queryWindow && queryWindow !== selectedWindow) {
+      setSelectedWindow(queryWindow);
+    }
+  }, [queryWindow, selectedWindow]);
+
+  const trendModel = useMemo(
+    () => buildTrendModel(rows, referenceNow, selectedWindow),
+    [rows, referenceNow, selectedWindow]
+  );
 
   const topReasonRows = useMemo(() => trendModel.reasonRows.slice(0, 10), [trendModel.reasonRows]);
-  const hubRankingRows = useMemo(() => trendModel.hubRows.slice(0, 10), [trendModel.hubRows]);
   const hubOptions = useMemo(() => trendModel.hubRows.map((row) => row.hub), [trendModel.hubRows]);
+  const hubSalesLookup = useMemo(() => {
+    const exactByKey = new Map<string, number>();
+    const fallbackByBase = new Map<string, HubSalesFallbackEntry>();
+
+    hubSalesRows.forEach((row) => {
+      const hubKey = normalizeHubKey(row.hubName);
+      exactByKey.set(hubKey, row.totalSales);
+
+      const baseKey = normalizeHubBaseKey(row.hubName);
+      const generation = extractGeneration(row.hubName);
+      const previous = fallbackByBase.get(baseKey) ?? {
+        totalSales: 0,
+        rowCount: 0,
+        hasGen4: false,
+        hasGen5: false
+      };
+      previous.totalSales += row.totalSales;
+      previous.rowCount += 1;
+      if (generation === "gen4") {
+        previous.hasGen4 = true;
+      }
+      if (generation === "gen5") {
+        previous.hasGen5 = true;
+      }
+      fallbackByBase.set(baseKey, previous);
+    });
+
+    return { exactByKey, fallbackByBase };
+  }, [hubSalesRows]);
+
+  const allHubRankingRows = useMemo<HubRankingRow[]>(() => {
+    return trendModel.hubRows.map((row) => {
+      const share = trendModel.totalRows > 0 ? (row.count / trendModel.totalRows) * 100 : 0;
+      const sales = resolveHubSalesTotal(row.hub, hubSalesLookup);
+      const normalizedToSales = typeof sales === "number" && sales > 0 ? row.count / sales : null;
+      return {
+        hub: row.hub,
+        count: row.count,
+        share,
+        sales,
+        normalizedToSales,
+        daily: row.daily
+      };
+    });
+  }, [trendModel.hubRows, trendModel.totalRows, hubSalesLookup]);
+
+  const sortedHubRankingRows = useMemo<HubRankingRow[]>(() => {
+    const direction = hubSort.direction === "asc" ? 1 : -1;
+    const rowsToSort = [...allHubRankingRows];
+    rowsToSort.sort((a, b) => {
+      const valueA = hubSort.key === "count" ? a.count : a.normalizedToSales;
+      const valueB = hubSort.key === "count" ? b.count : b.normalizedToSales;
+      if (valueA === null && valueB === null) {
+        return b.count - a.count || a.hub.localeCompare(b.hub);
+      }
+      if (valueA === null) {
+        return 1;
+      }
+      if (valueB === null) {
+        return -1;
+      }
+      if (valueA !== valueB) {
+        return (valueA - valueB) * direction;
+      }
+      return b.count - a.count || a.hub.localeCompare(b.hub);
+    });
+    return rowsToSort;
+  }, [allHubRankingRows, hubSort]);
+
+  const displayedHubRankingRows = useMemo<HubRankingRow[]>(() => {
+    if (hubSort.key === "normalizedToSales") {
+      return sortedHubRankingRows;
+    }
+    return sortedHubRankingRows.slice(0, 10);
+  }, [sortedHubRankingRows, hubSort.key]);
 
   useEffect(() => {
     if (!hubOptions.length) {
@@ -145,7 +455,7 @@ export default function ContactReasonsV2DrilldownPage() {
           globalCount: reason.count,
           hubShare,
           scope,
-          hubDaily: [...(scoped?.daily ?? createEmptyTrend())],
+          hubDaily: [...(scoped?.daily ?? createEmptyTrend(trendModel.buckets.length))],
           globalDaily: [...reason.daily]
         };
       })
@@ -156,9 +466,44 @@ export default function ContactReasonsV2DrilldownPage() {
         }
         return a.key.localeCompare(b.key);
       });
-  }, [selectedHub, trendModel.reasonRows, trendModel.hubReasonMap]);
+  }, [selectedHub, trendModel.reasonRows, trendModel.hubReasonMap, trendModel.buckets.length]);
 
   const lastBucketLabel = trendModel.buckets[trendModel.buckets.length - 1]?.label ?? "N/A";
+  const countColumnLabel =
+    selectedWindow === "24h" ? "24h count" : selectedWindow === "7d" ? "7d count" : "30d count";
+  const trendColumnLabel = WINDOW_GRANULARITY[selectedWindow] === "hourly" ? "Hourly trend" : "Daily trend";
+  const hubSortIndicator = (key: HubSortKey) => {
+    if (hubSort.key !== key) {
+      return "";
+    }
+    return hubSort.direction === "desc" ? "↓" : "↑";
+  };
+  const onHubSort = (key: HubSortKey) => {
+    setHubSort((previous) => {
+      if (previous.key === key) {
+        return { key, direction: previous.direction === "desc" ? "asc" : "desc" };
+      }
+      return { key, direction: "desc" };
+    });
+  };
+  const onWindowChange = (window: TimeWindow) => {
+    if (window === selectedWindow) {
+      return;
+    }
+    setSelectedWindow(window);
+    const nextQuery: Record<string, string> = { window };
+    if (selectedHub) {
+      nextQuery.hub = selectedHub;
+    }
+    void router.replace(
+      {
+        pathname: "/contact-reasons-v2",
+        query: nextQuery
+      },
+      undefined,
+      { shallow: true }
+    );
+  };
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -167,7 +512,7 @@ export default function ContactReasonsV2DrilldownPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-3">
               <Link
-                href="/"
+                href={{ pathname: "/", query: { window: selectedWindow } }}
                 className="rounded-full border border-slate-800 px-3 py-1 text-xs font-semibold text-slate-300 transition hover:border-brand-400 hover:text-brand-100"
               >
                 ← Back to dashboard
@@ -175,21 +520,50 @@ export default function ContactReasonsV2DrilldownPage() {
               <div>
                 <h1 className="text-2xl font-bold text-white">Top 10 Contact Reasons V2 Drilldown</h1>
                 <p className="text-sm text-slate-400">
-                  Daily trends for the last 7 days across reason + subreason and hub distribution.
+                  Trend view across reason + subreason and hub distribution.
                 </p>
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
-                7-day window
+                {WINDOW_LABELS[selectedWindow]}
               </span>
               <span className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs text-slate-300">
                 Through {lastBucketLabel}
               </span>
+              {salesRefreshStatus && (
+                <span className="max-w-[360px] truncate rounded-full border border-sky-700/50 bg-sky-950/30 px-3 py-1 text-xs text-sky-100">
+                  {salesRefreshStatus}
+                </span>
+              )}
+              {hubSalesWarning && (
+                <span className="max-w-[360px] truncate rounded-full border border-amber-700/60 bg-amber-950/30 px-3 py-1 text-xs text-amber-100">
+                  {hubSalesWarning}
+                </span>
+              )}
             </div>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Time window</span>
+            {WINDOW_OPTIONS.map((window) => (
+              <button
+                key={window}
+                type="button"
+                onClick={() => onWindowChange(window)}
+                className={clsx(
+                  "rounded-full border px-3 py-1 text-xs font-semibold transition",
+                  window === selectedWindow
+                    ? "border-brand-400 bg-brand-500/20 text-brand-50"
+                    : "border-slate-700 text-slate-300 hover:border-brand-400 hover:text-brand-100"
+                )}
+              >
+                {WINDOW_LABELS[window]}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-4">
             <SummaryStat
               label="Rows with V2 reason"
               value={trendModel.totalRows.toLocaleString()}
@@ -201,6 +575,10 @@ export default function ContactReasonsV2DrilldownPage() {
             <SummaryStat
               label="Hubs with volume"
               value={trendModel.hubRows.length.toLocaleString()}
+            />
+            <SummaryStat
+              label="Hubs with sales data"
+              value={hubSalesRows.length.toLocaleString()}
             />
           </div>
         </header>
@@ -218,111 +596,132 @@ export default function ContactReasonsV2DrilldownPage() {
 
         {!loading && !error && (
           <>
-            <section className="rounded-3xl border border-slate-800 bg-slate-900/70 p-5 shadow-inner">
-              <header className="mb-4">
-                <h2 className="text-lg font-semibold text-white">1. Top reason + subreason ranking</h2>
-                <p className="text-sm text-slate-400">
-                  Sorted by 7-day volume with daily trend sparkline.
-                </p>
-              </header>
-              <RankTableEmptyState rows={topReasonRows} emptyLabel="No V2 reason data available in the last 7 days.">
-                <table className="min-w-full divide-y divide-slate-800 text-sm">
-                  <thead className="bg-slate-900/80 text-slate-300">
-                    <tr>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">#</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Reason</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Subreason</th>
-                      <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">7d count</th>
-                      <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Share</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Daily trend</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800">
-                    {topReasonRows.map((row, index) => {
-                      const share = trendModel.totalRows > 0 ? (row.count / trendModel.totalRows) * 100 : 0;
-                      return (
-                        <tr key={row.key} className="bg-slate-900/30">
-                          <td className="px-3 py-2 text-xs text-slate-400">{index + 1}</td>
-                          <td className="px-3 py-2 text-slate-100">{row.topic}</td>
-                          <td className="px-3 py-2 text-slate-200">
-                            <Link
-                              href={`/reason-tickets?topic=${encodeURIComponent(row.topic)}&sub=${encodeURIComponent(row.sub)}&window=7d`}
-                              className="rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-xs text-slate-200 transition hover:border-brand-500 hover:text-white"
-                            >
-                              {row.sub}
-                            </Link>
-                          </td>
-                          <td className="px-3 py-2 text-right font-semibold text-white">{row.count.toLocaleString()}</td>
-                          <td className="px-3 py-2 text-right text-slate-300">{share.toFixed(1)}%</td>
-                          <td className="px-3 py-2">
-                            <Sparkline
-                              values={row.daily}
-                              labels={trendModel.buckets.map((bucket) => bucket.label)}
-                              colorClassName="text-brand-300"
-                            />
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </RankTableEmptyState>
-            </section>
+            <div className="grid gap-6 xl:grid-cols-2">
+              <section className="rounded-3xl border border-slate-800 bg-slate-900/70 p-5 shadow-inner">
+                <header className="mb-4">
+                  <h2 className="text-lg font-semibold text-white">Top reason ranking</h2>
+                  <p className="text-sm text-slate-400">
+                    Sorted by volume in {WINDOW_LABELS[selectedWindow].toLowerCase()} with trend sparkline.
+                  </p>
+                </header>
+                <RankTableEmptyState rows={topReasonRows} emptyLabel={`No V2 reason data available in ${WINDOW_LABELS[selectedWindow].toLowerCase()}.`}>
+                  <table className="min-w-full divide-y divide-slate-800 text-sm">
+                    <thead className="bg-slate-900/80 text-slate-300">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">#</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Reason + subreason</th>
+                        <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">{countColumnLabel}</th>
+                        <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Share</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">{trendColumnLabel}</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {topReasonRows.map((row, index) => {
+                        const share = trendModel.totalRows > 0 ? (row.count / trendModel.totalRows) * 100 : 0;
+                        return (
+                          <tr key={row.key} className="bg-slate-900/30">
+                            <td className="px-3 py-2 text-xs text-slate-400">{index + 1}</td>
+                            <td className="px-3 py-2 text-slate-200">
+                              <Link
+                                href={`/reason-tickets?topic=${encodeURIComponent(row.topic)}&sub=${encodeURIComponent(row.sub)}&window=${selectedWindow}`}
+                                className="rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-xs text-slate-200 transition hover:border-brand-500 hover:text-white"
+                              >
+                                {row.topic} · {row.sub}
+                              </Link>
+                            </td>
+                            <td className="px-3 py-2 text-right font-semibold text-white">{row.count.toLocaleString()}</td>
+                            <td className="px-3 py-2 text-right text-slate-300">{share.toFixed(1)}%</td>
+                            <td className="px-3 py-2">
+                              <Sparkline
+                                values={row.daily}
+                                labels={trendModel.buckets.map((bucket) => bucket.label)}
+                                colorClassName="text-brand-300"
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </RankTableEmptyState>
+              </section>
 
-            <section className="rounded-3xl border border-slate-800 bg-slate-900/70 p-5 shadow-inner">
-              <header className="mb-4">
-                <h2 className="text-lg font-semibold text-white">2. Hub ranking for V2 contact reasons</h2>
-                <p className="text-sm text-slate-400">
-                  Hubs ordered by total V2 reason occurrences in the last 7 days.
-                </p>
-              </header>
-              <RankTableEmptyState rows={hubRankingRows} emptyLabel="No hub volume available in the last 7 days.">
-                <table className="min-w-full divide-y divide-slate-800 text-sm">
-                  <thead className="bg-slate-900/80 text-slate-300">
-                    <tr>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">#</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Hub</th>
-                      <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">7d count</th>
-                      <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Share</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Daily trend</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800">
-                    {hubRankingRows.map((row, index) => {
-                      const share = trendModel.totalRows > 0 ? (row.count / trendModel.totalRows) * 100 : 0;
-                      return (
-                        <tr key={row.hub} className="bg-slate-900/30">
-                          <td className="px-3 py-2 text-xs text-slate-400">{index + 1}</td>
-                          <td className="px-3 py-2">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedHub(row.hub)}
-                              className={clsx(
-                                "rounded border px-2 py-1 text-left text-xs transition",
-                                selectedHub === row.hub
-                                  ? "border-brand-500/80 bg-brand-500/20 text-brand-100"
-                                  : "border-slate-700 bg-slate-900/60 text-slate-200 hover:border-brand-500 hover:text-white"
-                              )}
-                            >
-                              {row.hub}
-                            </button>
-                          </td>
-                          <td className="px-3 py-2 text-right font-semibold text-white">{row.count.toLocaleString()}</td>
-                          <td className="px-3 py-2 text-right text-slate-300">{share.toFixed(1)}%</td>
-                          <td className="px-3 py-2">
-                            <Sparkline
-                              values={row.daily}
-                              labels={trendModel.buckets.map((bucket) => bucket.label)}
-                              colorClassName="text-sky-300"
-                            />
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </RankTableEmptyState>
-            </section>
+              <section className="rounded-3xl border border-slate-800 bg-slate-900/70 p-5 shadow-inner">
+                <header className="mb-4">
+                  <h2 className="text-lg font-semibold text-white">Hub ranking issue rankings</h2>
+                  <p className="text-sm text-slate-400">
+                    {hubSort.key === "normalizedToSales"
+                      ? `Sorted by normalized sales across all ${allHubRankingRows.length} hubs.`
+                      : `Hubs ordered by total V2 reason occurrences in ${WINDOW_LABELS[selectedWindow].toLowerCase()} (top 10 shown).`}
+                  </p>
+                </header>
+                <RankTableEmptyState rows={displayedHubRankingRows} emptyLabel={`No hub volume available in ${WINDOW_LABELS[selectedWindow].toLowerCase()}.`}>
+                  <table className="min-w-full divide-y divide-slate-800 text-sm">
+                    <thead className="bg-slate-900/80 text-slate-300">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">#</th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Hub</th>
+                        <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">
+                          <button
+                            type="button"
+                            onClick={() => onHubSort("count")}
+                            className="inline-flex items-center gap-1 hover:text-white"
+                          >
+                            {countColumnLabel} {hubSortIndicator("count")}
+                          </button>
+                        </th>
+                        <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Share</th>
+                        <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">
+                          <button
+                            type="button"
+                            onClick={() => onHubSort("normalizedToSales")}
+                            className="inline-flex items-center gap-1 hover:text-white"
+                          >
+                            Normalized to sales (%) {hubSortIndicator("normalizedToSales")}
+                          </button>
+                        </th>
+                        <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">{trendColumnLabel}</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800">
+                      {displayedHubRankingRows.map((row, index) => {
+                        return (
+                          <tr key={row.hub} className="bg-slate-900/30">
+                            <td className="px-3 py-2 text-xs text-slate-400">{index + 1}</td>
+                            <td className="px-3 py-2">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedHub(row.hub)}
+                                className={clsx(
+                                  "rounded border px-2 py-1 text-left text-xs transition",
+                                  selectedHub === row.hub
+                                    ? "border-brand-500/80 bg-brand-500/20 text-brand-100"
+                                    : "border-slate-700 bg-slate-900/60 text-slate-200 hover:border-brand-500 hover:text-white"
+                                )}
+                              >
+                                {row.hub}
+                              </button>
+                            </td>
+                            <td className="px-3 py-2 text-right font-semibold text-white">{row.count.toLocaleString()}</td>
+                            <td className="px-3 py-2 text-right text-slate-300">{row.share.toFixed(1)}%</td>
+                            <td className="px-3 py-2 text-right text-slate-300">
+                              {formatSalesNormalizedValue(row.normalizedToSales)}
+                            </td>
+                            <td className="px-3 py-2">
+                              <Sparkline
+                                values={row.daily}
+                                labels={trendModel.buckets.map((bucket) => bucket.label)}
+                                colorClassName="text-sky-300"
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </RankTableEmptyState>
+              </section>
+            </div>
 
             <section className="rounded-3xl border border-slate-800 bg-slate-900/70 p-5 shadow-inner">
               <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -352,28 +751,30 @@ export default function ContactReasonsV2DrilldownPage() {
               </header>
               <RankTableEmptyState
                 rows={hubReasonRows}
-                emptyLabel={selectedHub ? `No reason rows found for ${selectedHub} in this 7-day window.` : "Select a hub to view reason trends."}
+                emptyLabel={
+                  selectedHub
+                    ? `No reason rows found for ${selectedHub} in ${WINDOW_LABELS[selectedWindow].toLowerCase()}.`
+                    : "Select a hub to view reason trends."
+                }
               >
                 <table className="min-w-full divide-y divide-slate-800 text-sm">
                   <thead className="bg-slate-900/80 text-slate-300">
                     <tr>
                       <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">#</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Reason</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Subreason</th>
-                      <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Hub 7d</th>
-                      <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Global 7d</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Reason + subreason</th>
+                      <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Hub {selectedWindow}</th>
+                      <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Global {selectedWindow}</th>
                       <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-wide">Hub share</th>
                       <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Scope</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Hub trend</th>
-                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Global trend</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Hub {trendColumnLabel.toLowerCase()}</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Global {trendColumnLabel.toLowerCase()}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
                     {hubReasonRows.map((row, index) => (
                       <tr key={`${selectedHub}-${row.key}`} className="bg-slate-900/30">
                         <td className="px-3 py-2 text-xs text-slate-400">{index + 1}</td>
-                        <td className="px-3 py-2 text-slate-100">{row.topic}</td>
-                        <td className="px-3 py-2 text-slate-200">{row.sub}</td>
+                        <td className="px-3 py-2 text-slate-200">{row.topic} · {row.sub}</td>
                         <td className="px-3 py-2 text-right font-semibold text-white">{row.hubCount.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right text-slate-300">{row.globalCount.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right text-slate-300">{row.hubShare.toFixed(1)}%</td>
@@ -502,11 +903,12 @@ function Sparkline({
   );
 }
 
-function buildTrendModel(rows: ConversationRow[], referenceNow: Date): TrendModel {
-  const buckets = buildDailyBuckets(referenceNow, TREND_DAY_COUNT);
+function buildTrendModel(rows: ConversationRow[], referenceNow: Date, window: TimeWindow): TrendModel {
+  const buckets = buildBuckets(referenceNow, window);
   const bucketIndex = new Map<string, number>(buckets.map((bucket, index) => [bucket.key, index]));
-  const firstBucketStart = buckets[0]?.start.getTime() ?? referenceNow.getTime();
-  const rangeEnd = firstBucketStart + TREND_DAY_COUNT * DAY_MS;
+  const windowStart = referenceNow.getTime() - WINDOW_DURATION_MS[window];
+  const granularity = WINDOW_GRANULARITY[window];
+  const trendLength = buckets.length;
 
   const reasonMap = new Map<string, TrendCounter & { topic: string; sub: string }>();
   const hubMap = new Map<string, TrendCounter>();
@@ -525,10 +927,10 @@ function buildTrendModel(rows: ConversationRow[], referenceNow: Date): TrendMode
       return;
     }
     const timestamp = referenceDate.getTime();
-    if (timestamp < firstBucketStart || timestamp >= rangeEnd) {
+    if (timestamp < windowStart || timestamp > referenceNow.getTime()) {
       return;
     }
-    const bucketKey = formatBucketKey(referenceDate);
+    const bucketKey = formatBucketKey(referenceDate, granularity);
     const index = bucketIndex.get(bucketKey);
     if (index === undefined) {
       return;
@@ -539,18 +941,18 @@ function buildTrendModel(rows: ConversationRow[], referenceNow: Date): TrendMode
     const reasonKey = makeReasonKey(topic, sub);
 
     if (!reasonMap.has(reasonKey)) {
-      reasonMap.set(reasonKey, { topic, sub, count: 0, daily: createEmptyTrend() });
+      reasonMap.set(reasonKey, { topic, sub, count: 0, daily: createEmptyTrend(trendLength) });
     }
     incrementCounter(reasonMap.get(reasonKey)!, index);
 
     if (!hubMap.has(hub)) {
-      hubMap.set(hub, { count: 0, daily: createEmptyTrend() });
+      hubMap.set(hub, { count: 0, daily: createEmptyTrend(trendLength) });
     }
     incrementCounter(hubMap.get(hub)!, index);
 
     const hubReasonKey = makeHubReasonKey(hub, reasonKey);
     if (!hubReasonMap.has(hubReasonKey)) {
-      hubReasonMap.set(hubReasonKey, { count: 0, daily: createEmptyTrend() });
+      hubReasonMap.set(hubReasonKey, { count: 0, daily: createEmptyTrend(trendLength) });
     }
     incrementCounter(hubReasonMap.get(hubReasonKey)!, index);
   });
@@ -597,17 +999,26 @@ function incrementCounter(counter: TrendCounter, index: number) {
   counter.daily[index] = (counter.daily[index] ?? 0) + 1;
 }
 
-function buildDailyBuckets(referenceNow: Date, days: number): Bucket[] {
-  const today = startOfDay(referenceNow);
-  return Array.from({ length: days }, (_, index) => {
-    const offset = days - index - 1;
-    const start = new Date(today.getTime() - offset * DAY_MS);
+function buildBuckets(referenceNow: Date, window: TimeWindow): Bucket[] {
+  const granularity = WINDOW_GRANULARITY[window];
+  const count = WINDOW_BUCKET_COUNT[window];
+  const bucketMs = granularity === "hourly" ? HOUR_MS : DAY_MS;
+  const aligned = granularity === "hourly" ? startOfHour(referenceNow) : startOfDay(referenceNow);
+  return Array.from({ length: count }, (_, index) => {
+    const offset = count - index - 1;
+    const start = new Date(aligned.getTime() - offset * bucketMs);
     return {
-      key: formatBucketKey(start),
-      label: formatBucketLabel(start),
+      key: formatBucketKey(start, granularity),
+      label: formatBucketLabel(start, granularity),
       start
     };
   });
+}
+
+function startOfHour(value: Date): Date {
+  const hour = new Date(value);
+  hour.setMinutes(0, 0, 0);
+  return hour;
 }
 
 function startOfDay(value: Date): Date {
@@ -616,17 +1027,27 @@ function startOfDay(value: Date): Date {
   return day;
 }
 
-function formatBucketLabel(value: Date): string {
+function formatBucketLabel(value: Date, granularity: "hourly" | "daily"): string {
+  if (granularity === "hourly") {
+    return value.toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  }
   return value.toLocaleDateString(undefined, {
     month: "short",
     day: "numeric"
   });
 }
 
-function formatBucketKey(value: Date): string {
+function formatBucketKey(value: Date, granularity: "hourly" | "daily"): string {
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, "0");
   const day = String(value.getDate()).padStart(2, "0");
+  if (granularity === "hourly") {
+    const hour = String(value.getHours()).padStart(2, "0");
+    return `${year}-${month}-${day}-${hour}`;
+  }
   return `${year}-${month}-${day}`;
 }
 
@@ -665,6 +1086,72 @@ function resolveHubLabel(row: ConversationRow): string {
   return normalized || "Unassigned";
 }
 
-function createEmptyTrend(): number[] {
-  return Array.from({ length: TREND_DAY_COUNT }, () => 0);
+function normalizeHubKey(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeHubBaseKey(value: string): string {
+  return normalizeHubKey(value)
+    .replace(/\bgen\s*\d+\b/g, " ")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractGeneration(value: string): "gen4" | "gen5" | null {
+  const match = normalizeHubKey(value).match(/\bgen\s*(\d+)\b/);
+  if (!match?.[1]) {
+    return null;
+  }
+  if (match[1] === "4") {
+    return "gen4";
+  }
+  if (match[1] === "5") {
+    return "gen5";
+  }
+  return null;
+}
+
+function resolveHubSalesTotal(
+  hubName: string,
+  lookup: {
+    exactByKey: Map<string, number>;
+    fallbackByBase: Map<string, HubSalesFallbackEntry>;
+  }
+): number | null {
+  const direct = lookup.exactByKey.get(normalizeHubKey(hubName));
+  if (typeof direct === "number") {
+    return direct;
+  }
+
+  const fallback = lookup.fallbackByBase.get(normalizeHubBaseKey(hubName));
+  if (!fallback) {
+    return null;
+  }
+
+  // Fallback applies when telemetry is split into GEN4 + GEN5 rows.
+  if (fallback.hasGen4 && fallback.hasGen5 && fallback.rowCount >= 2) {
+    return fallback.totalSales;
+  }
+
+  return null;
+}
+
+function formatSalesNormalizedValue(value: number | null): string {
+  if (value === null || Number.isNaN(value)) {
+    return "—";
+  }
+  return `${(value * 100).toFixed(2)}%`;
+}
+
+function toFiniteNumber(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value ?? 0);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+  return parsed;
+}
+
+function createEmptyTrend(length: number): number[] {
+  return Array.from({ length }, () => 0);
 }

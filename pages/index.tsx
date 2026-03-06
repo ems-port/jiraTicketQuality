@@ -8,7 +8,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentMatrixHeatmap } from "@/components/AgentMatrixHeatmap";
 import { AgentRankList } from "@/components/AgentRankList";
 import { CustomerSentimentPanel } from "@/components/CustomerSentimentPanel";
-import { ContactReasonPanel } from "@/components/ContactReasonPanel";
 import { ContactReasonV2Panel } from "@/components/ContactReasonV2Panel";
 import { CommandCenterPanel } from "@/components/CommandCenterPanel";
 import { EscalationCard } from "@/components/EscalationCard";
@@ -27,7 +26,6 @@ import {
   computeAgentMatrix,
   computeAverageConversationRating,
   computeAverageDurationToResolution,
-  computeContactReasonSummary,
   computeContactReasonV2Summary,
   buildEscalationSeries,
   computeFlaggedAgents,
@@ -164,6 +162,13 @@ export default function DashboardPage({
   initialAgentOrder = []
 }: DashboardPageProps) {
   const router = useRouter();
+  const initialWindowFromQuery = useMemo<TimeWindow | null>(() => {
+    const raw = router.query.window;
+    if (raw === "24h" || raw === "7d" || raw === "30d") {
+      return raw;
+    }
+    return null;
+  }, [router.query.window]);
   const buildNumber = process.env.NEXT_PUBLIC_BUILD_NUMBER ?? "dev";
   const rows = useDashboardStore((state) => state.rows);
   const setRows = useDashboardStore((state) => state.setRows);
@@ -241,6 +246,12 @@ export default function DashboardPage({
   const initialLoadAttemptedRef = useRef(false);
   const initialRoleLoadAttemptedRef = useRef(false);
   const lastRefreshCompletionRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (initialWindowFromQuery && initialWindowFromQuery !== selectedWindow) {
+      setSelectedWindow(initialWindowFromQuery);
+    }
+  }, [initialWindowFromQuery, selectedWindow]);
 
   const loadPromptConfigs = useCallback(async () => {
     setPromptConfigLoading(true);
@@ -886,10 +897,6 @@ export default function DashboardPage({
     return sum / values.length;
   }, [attributeFilteredRows, selectedWindow, referenceNow]);
 
-  const contactReasonSummary = useMemo(
-    () => computeContactReasonSummary(attributeFilteredRows, selectedWindow, referenceNow),
-    [attributeFilteredRows, selectedWindow, referenceNow]
-  );
   const contactReasonV2Summary = useMemo(
     () => computeContactReasonV2Summary(attributeFilteredRows, selectedWindow, referenceNow),
     [attributeFilteredRows, selectedWindow, referenceNow]
@@ -1152,21 +1159,25 @@ export default function DashboardPage({
     setDrilldownState({ metricLabel, rows: data, initialAgentId });
   };
 
-  const handleContactReasonSelect = useCallback(
-    (reason: string) => {
-      const query: Record<string, string> = {
-        reason,
-        window: selectedWindow
-      };
-      if (hubFilter !== "All") {
-        query.hub = hubFilter;
+  const handleDashboardWindowChange = useCallback(
+    (window: TimeWindow) => {
+      setSelectedWindow(window);
+      const nextQuery = { ...router.query };
+      if (window === "7d") {
+        delete nextQuery.window;
+      } else {
+        nextQuery.window = window;
       }
-      void router.push({
-        pathname: "/contact-reasons",
-        query
-      });
+      void router.replace(
+        {
+          pathname: router.pathname,
+          query: nextQuery
+        },
+        undefined,
+        { shallow: true }
+      );
     },
-    [router, selectedWindow, hubFilter]
+    [router]
   );
 
   const handleMisclassifiedDrilldown = useCallback(
@@ -1378,7 +1389,7 @@ export default function DashboardPage({
                     <button
                       key={window}
                       type="button"
-                      onClick={() => setSelectedWindow(window)}
+                      onClick={() => handleDashboardWindowChange(window)}
                       className={
                         window === selectedWindow
                           ? "rounded-full bg-brand-500 px-4 py-2 text-sm font-semibold text-white"
@@ -1564,11 +1575,6 @@ export default function DashboardPage({
             <TicketVolumePanel rows={filteredRows} referenceNow={referenceNow} window={selectedWindow} />
 
             <ContactReasonV2Panel summary={contactReasonV2Summary} window={selectedWindow} rows={attributeFilteredRows} />
-            <ContactReasonPanel
-              summary={contactReasonSummary}
-              window={selectedWindow}
-              onSelect={handleContactReasonSelect}
-            />
 
           </div>
 

@@ -39,7 +39,7 @@ export function ContactReasonV2Panel({ summary, window, rows }: Props) {
             {summary.total.toLocaleString()} ticket{summary.total === 1 ? "" : "s"} in view
           </span>
           <Link
-            href="/contact-reasons-v2"
+            href={`/contact-reasons-v2?window=${window}`}
             className="rounded-full border border-brand-500/40 bg-brand-500/10 px-3 py-1 text-xs font-semibold text-brand-100 transition hover:border-brand-400 hover:bg-brand-500/20 hover:text-brand-50"
           >
             View drilldown
