@@ -81,6 +81,17 @@ Add the following variables to `.env` (or your deployment secret store):
 | `SUPABASE_DB_URL` | Optional Postgres connection string for automatic table creation. |
 | `SUPABASE_JIRA_PREPARED_TABLE` | Optional override for the prepared dataset table (default `jira_prepared_conversations`). |
 | `REFRESH_CRON_SECRET` | Optional shared secret checked by the `/api/cron/refresh` endpoint. |
+| `THINGSBOARD_URL` | ThingsBoard base URL (for example `https://iot.port.app`). |
+| `THINGSBOARD_USERNAME` | ThingsBoard login username. |
+| `THINGSBOARD_PASSWORD` | ThingsBoard login password. |
+| `THINGSBOARD_ASSET_TYPE` | Optional default ThingsBoard asset type filter (defaults to `Hub`). |
+| `THINGSBOARD_ASSET_LABEL` | Optional default exact label filter (defaults to `production`). |
+| `THINGSBOARD_API_TEXT_SEARCH` | Optional ThingsBoard `textSearch` hint to reduce API pages. |
+| `SUPABASE_HUB_TELEMETRY_TABLE` | Optional target history table for hub telemetry (defaults to `hub_telemetry_history`). |
+| `HUB_TELEMETRY_SYNC_SECRET` | Required in production to authorize `/api/hub-telemetry/sync`. |
+| `HUB_TELEMETRY_MIN_INTERVAL_SECONDS` | Optional cooldown between endpoint invocations (default `60`). |
+| `HUB_TELEMETRY_MAX_PAGE_SIZE` | Optional hard cap for requested page size (default `250`). |
+| `HUB_TELEMETRY_ALLOW_STATUS_GET` | Optional (`true`/`false`) to enable authenticated `GET /api/hub-telemetry/sync` status output (default `false`). |
 
 Install the Python dependencies and run:
 
@@ -147,6 +158,36 @@ with the following scheduling workflow:
 When the cron invocation starts the job it returns immediately with the current job state.
 The serverless function streams Python logs to Vercel’s function logs, so failed runs can
 be debugged without re-deploying.
+
+## Hub telemetry sync endpoint
+
+Use `POST /api/hub-telemetry/sync` to pull latest ThingsBoard hub telemetry and insert a
+snapshot into Supabase history table `hub_telemetry_history`.
+
+- `GET /api/hub-telemetry/sync`: readiness check (env/defaults/auth configuration).
+- `POST /api/hub-telemetry/sync`: run sync now.
+- Auth required in all environments: set `HUB_TELEMETRY_SYNC_SECRET`, then pass one of:
+  - `Authorization: Bearer <secret>`
+  - `x-sync-secret: <secret>`
+  - `x-internal-token: <secret>`
+  - query string `?token=<secret>`
+- `GET /api/hub-telemetry/sync` is disabled by default; set `HUB_TELEMETRY_ALLOW_STATUS_GET=true` to enable it.
+
+Example dry run (hubs only):
+
+```bash
+curl -X POST http://localhost:3000/api/hub-telemetry/sync \
+  -H "Content-Type: application/json" \
+  -d '{"dryRun":true,"dryRunStage":"hubs"}'
+```
+
+Example write run:
+
+```bash
+curl -X POST http://localhost:3000/api/hub-telemetry/sync \
+  -H "Content-Type: application/json" \
+  -d '{"dryRun":false}'
+```
 
 ## Next steps
 
